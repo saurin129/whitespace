@@ -281,8 +281,13 @@ pass itself is not built yet.
    area is the union of selected ZCTAs, not the whole state. Frontend loads ZIPs on the
    map's `idle` event (`loadVisibleZips`) once zoom >= `MIN_ZIP_ZOOM`, adding only ZIPs
    not already on the map. Backend verified locally against Neon + TIGERweb with Places
-   mocked; frontend verified in Node against a mocked google.maps - **not yet clicked
-   through in a real browser.**
+   mocked; frontend verified end-to-end in headless Chromium (Playwright, 2026-09-27):
+   CA/TX/RI ZIP loading, selection, cross-border refusal, a real Chipotle search, reset,
+   and fast state switching. That run also found and fixed: unselected ZIP outlines were
+   invisible against Google's street grid (now darker slate, 1.5px); Flask debug mode
+   pretty-printed JSON, inflating local responses ~4x (`app.json.compact = True`);
+   simplification tolerance loosened to ~1 screen pixel (`bbox width / 1000`); stale
+   status text after switching states.
 2. ~~**Postgres + PostGIS data store**~~ — **provisioned on Neon (2026-09-27), schema
    applied, `zctas` loaded.** `migrations/schema.sql` defines 7 tables: `zctas` (ZIP
    outlines for the ZIP selector, bulk-loaded), `restaurant_locations` (Coverage MCP

@@ -199,6 +199,7 @@ function onStateChange() {
   stateLoadId++;
   clearZipSelection();
   clearZctaLayer();
+  setStatus(""); // drop leftover "N ZIP codes selected" from the previous state
 
   if (!stateCode) {
     zipPanel.classList.add("hidden");
@@ -306,17 +307,21 @@ function styleZctaFeature(feature) {
     // Neighbouring state's ZIP: faint outline only, not clickable-looking.
     zctaLayer.overrideStyle(feature, {
       fillOpacity: 0,
-      strokeColor: "#c5c8d4",
-      strokeWeight: 0.5,
+      strokeColor: "#8a90a3",
+      strokeOpacity: 0.45,
+      strokeWeight: 0.75,
     });
     return;
   }
+  // Unselected outlines need to be darker than Google's grey street grid,
+  // or they disappear into it (ZIP lines often follow streets).
   const selected = isZipSelected(feature.getProperty("ZCTA5"));
   zctaLayer.overrideStyle(feature, {
-    fillColor: selected ? "#3866f2" : "#9aa0b4",
-    fillOpacity: selected ? 0.3 : 0.05,
-    strokeColor: selected ? "#3866f2" : "#9aa0b4",
-    strokeWeight: selected ? 2 : 1,
+    fillColor: selected ? "#3866f2" : "#4a5068",
+    fillOpacity: selected ? 0.3 : 0.04,
+    strokeColor: selected ? "#3866f2" : "#4a5068",
+    strokeOpacity: selected ? 1 : 0.8,
+    strokeWeight: selected ? 2.5 : 1.5,
   });
 }
 

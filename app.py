@@ -62,6 +62,10 @@ def _make_cache_dir(name):
 CACHE_DIR, CACHE_ENABLED = _make_cache_dir("state_boundary_cache")
 
 app = Flask(__name__, static_folder="public/static", static_url_path="/static")
+# Flask pretty-prints JSON in debug mode (python app.py), which made local
+# ZIP-outline responses ~4x bigger than on Vercel. Always compact, so local
+# size checks match production.
+app.json.compact = True
 
 
 def get_api_key():
@@ -202,7 +206,7 @@ def fetch_zctas_in_bbox(state_code, bbox):
     Returns (geojson, source, truncated).
     """
     south, west, north, east = bbox
-    tolerance = (east - west) / 2000  # degrees; about a pixel on a wide screen
+    tolerance = (east - west) / 1000  # degrees; about one screen pixel for a typical map width
 
     if db.DB_ENABLED:
         rows = db.fetch_all(

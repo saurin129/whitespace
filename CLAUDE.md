@@ -222,15 +222,18 @@ pass itself is not built yet.
   Measured 2026-09-27: a 1.4-mile circle in Westwood returned 60 Chipotles out to 18 miles
   (2 inside the circle), so every search paged through all 3 pages with a ~2s wait before
   pages 2 and 3. ZIP search therefore uses `google_places_nearest()` (`rankby=distance`,
-  nearest-first) on circles fitted to each ZIP (`zip_search_circles()`: usually 1 circle
+  nearest-first) on circles fitted to each ZIP (`fit_search_circles()`: usually 1 circle
   of 0.5-3 mi in cities; parts grouped into <=25-mile circles; grid of 25-mile circles for
   huge rural ZIPs), and `google_places_paginated(stop_after=...)` stops at the first page
   that reaches past the circle. All circles for all selected ZIPs run in parallel
   (`ThreadPoolExecutor`, max 6). `any_zip_truncated` now also means Google's 60-result cap
   was hit inside a circle. Measured: LA 2-ZIP Chipotle 10.6 s -> 0.5 s; Midtown 10001
   Starbucks 5.6 s -> 2.9 s and 18 in-ZIP results vs 17 (old way missed one). The
-  drawn-area search (`/api/search-area`) still uses fixed 25-mile tiles with `radius` and
-  would benefit from the same treatment.
+  drawn-area search (`/api/search-area`) uses the same `fit_search_circles()` +
+  `search_circles()` path (drawn shape = one part); measured on a ~10-mile Westside
+  area (Chipotle): 5.2 s -> 0.4 s, same 9 results. The radius-based
+  `google_places_nearby_search()` is gone; only the unused whole-state `/api/search` still
+  uses Text Search.
 - **ZCTA data = Census cartographic boundary file, bulk-loaded once.** Use
   `https://www2.census.gov/geo/tiger/GENZ2020/shp/cb_2020_us_zcta520_500k.zip`
   (67 MB zipped; 33,791 ZCTAs, 5.95M vertices; 111 MB in PostGIS as loaded). Loaded by

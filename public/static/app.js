@@ -588,7 +588,7 @@ async function searchDrawnArea(restaurantName, radiusMiles, drawnPath) {
   let msg = `Showing ${searchResp.locations.length} location${searchResp.locations.length === 1 ? "" : "s"} ` +
     `with a ${radiusMiles}-mile radius (searched using ${searchResp.tiles_used} sub-area${searchResp.tiles_used === 1 ? "" : "s"}).`;
   if (searchResp.truncated) {
-    msg += " Note: the drawn area was large enough that some of it may not have been searched.";
+    msg += " Note: some locations in this area may be missing (it was very large, or Google capped the results).";
   }
   setStatus(msg, !!searchResp.truncated);
 }

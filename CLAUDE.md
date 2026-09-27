@@ -94,8 +94,10 @@ by topic instead; read both if picking this up cold.
     referrer-restricted to the Vercel domain + Maps JS only; server `GOOGLE_PLACES_API_KEY`
     Places-only) after the referrer restriction broke server-side searches.
 15. Frontend: state selection now zooms immediately from a `data-bbox` on each
-    `<option>` (no longer waits on ZCTA + boundary fetches); added a "Reset map" map
-    control (`resetMap()` in `app.js`), keeps restaurant name + radius. Stale ZCTA
+    `<option>` (no longer waits on ZCTA + boundary fetches); added a "Reset" map
+    control (`resetResults()` in `app.js`) - per user, it clears only search results
+    (markers, circles, shading, list) and keeps state, loaded ZIPs, selected ZIPs,
+    drawn area and map view. Stale ZCTA
     responses are dropped via a `stateLoadId` counter.
 16. Diagnosed the large-state ZIP bug (see Gotchas) and decided to back ZCTAs with the
     database + viewport-based loading (see Roadmap item 2). Sized the whole data store

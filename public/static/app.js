@@ -78,26 +78,19 @@ function addResetControl() {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "map-control-btn";
-  btn.textContent = "Reset map";
-  btn.title = "Clear results, selections and drawn areas, and zoom back out";
-  btn.addEventListener("click", resetMap);
+  btn.textContent = "Reset";
+  btn.title = "Clear the search results (keeps your selected ZIPs and map view)";
+  btn.addEventListener("click", resetResults);
   map.controls[google.maps.ControlPosition.TOP_RIGHT].push(btn);
 }
 
-// Clears everything on the map and the area selection (state, ZIPs, drawn
-// shape), but keeps the restaurant name and radius so the user can re-run
-// the same search somewhere else.
-function resetMap() {
-  stateLoadId++;
+// Clears only the search results (store markers, radius circles, coverage
+// shading, results list). The state, the ZIP outlines already loaded, the
+// selected ZIPs / drawn area and the map view all stay, so the user can
+// change the restaurant or radius and search the same area again.
+function resetResults() {
   clearResults();
-  clearDrawnPolygon();
-  clearZipSelection();
-  clearZctaLayer();
-  stateSelect.value = "";
-  zipPanel.classList.add("hidden");
   infoWindow.close();
-  map.setCenter(US_VIEW.center);
-  map.setZoom(US_VIEW.zoom);
   setStatus("");
 }
 

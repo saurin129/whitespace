@@ -254,7 +254,7 @@ button#search-btn:hover:not(:disabled) {
   font-size: 12px;
 }
 
-/* "Reset map" button, placed on the map itself via map.controls. Styled to
+/* "Reset" button, placed on the map itself via map.controls. Styled to
    match Google's own map controls. */
 .map-control-btn {
   margin: 10px;

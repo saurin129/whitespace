@@ -196,10 +196,11 @@ def parse_bbox(raw):
 
 
 def fetch_zctas_in_bbox(state_code, bbox):
-    """ZCTA outlines intersecting the viewport, as a GeoJSON FeatureCollection
-    with properties {ZCTA5, selectable}. `selectable` is False for ZIPs that
-    belong entirely to another state (visible across a state line, but the
-    search is scoped to `state_code`). Outlines are simplified to roughly
+    """The selected state's ZCTA outlines intersecting the viewport, as a
+    GeoJSON FeatureCollection with properties {ZCTA5, selectable}. Neighbouring
+    states' ZIPs aren't returned: they can't be searched anyway, and near a
+    border they're most of the payload (RI's state view: 743 ZIPs / 266 KB
+    with neighbours vs 81 / 33 KB without). Outlines are simplified to roughly
     screen resolution for the viewport size, which keeps a dense viewport
     (e.g. around NYC) well under Vercel's ~4.5 MB response cap.
 
@@ -211,25 +212,25 @@ def fetch_zctas_in_bbox(state_code, bbox):
     if db.DB_ENABLED:
         rows = db.fetch_all(
             """
-            SELECT zcta5, state_codes,
+            SELECT zcta5,
                    ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, %s), 5) AS geometry
             FROM zctas
             WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
-            -- If the cap is hit, keep the selected state's ZIPs nearest the
-            -- middle of the view, not whichever ZIP numbers sort first.
-            ORDER BY (%s = ANY(state_codes)) DESC,
-                     geom <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+              AND %s = ANY(state_codes)
+            -- If the cap is hit, keep the ZIPs nearest the middle of the
+            -- view, not whichever ZIP numbers sort first.
+            ORDER BY geom <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)
             LIMIT %s
             """,
-            (tolerance, west, south, east, north,
-             state_code, (west + east) / 2, (south + north) / 2,
+            (tolerance, west, south, east, north, state_code,
+             (west + east) / 2, (south + north) / 2,
              MAX_VIEWPORT_ZCTAS + 1),
         )
         truncated = len(rows) > MAX_VIEWPORT_ZCTAS
         features = [
             {
                 "type": "Feature",
-                "properties": {"ZCTA5": r["zcta5"], "selectable": state_code in r["state_codes"]},
+                "properties": {"ZCTA5": r["zcta5"], "selectable": True},
                 "geometry": json.loads(r["geometry"]),
             }
             for r in rows[:MAX_VIEWPORT_ZCTAS]

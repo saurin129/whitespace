@@ -36,10 +36,20 @@ let drawBtn, finishDrawBtn, clearDrawBtn;
 // ZIP outlines load for the visible map area only, once zoomed in to
 // MIN_ZIP_ZOOM, and more load as the user pans - a whole large state's ZIPs
 // are far too much data to send at once (see CLAUDE.md Gotchas).
+//
+// Each state's loaded ZIPs are kept in the browser (zipCache) for the whole
+// session: switching to another state just hides them, and switching back
+// shows them again without re-requesting areas already viewed.
 const MAX_SELECTED_ZIPS = 3;
 const MIN_ZIP_ZOOM = 9; // roughly county level
-let zctaLayer = null; // google.maps.Data, ZCTAs loaded so far for the selected state
+// A view is re-requested only if no earlier request for this state covered
+// it at a similar zoom - outlines are simplified to ~1px for the view they
+// were fetched at, so reusing a much more zoomed-out load would look jagged.
+const MAX_REUSE_SPAN_RATIO = 2;
+const zipCache = new Map(); // stateCode -> { layer, loadedZips: Set, fetchedBoxes: [[s, w, n, e], ...] }
+let zctaLayer = null; // google.maps.Data for the selected state (from zipCache)
 let loadedZips = new Set(); // ZIP codes already in zctaLayer, so panning back doesn't re-add them
+let fetchedBoxes = []; // viewports already requested for the selected state
 let zipIdleListener = null; // map "idle" listener that loads ZIPs for the new view
 let zipViewportAbort = null; // AbortController for the in-flight viewport request
 let selectedZips = []; // [{ zip, feature: <GeoJSON Feature> }, ...] in click order, max 3
@@ -200,7 +210,7 @@ function onStateChange() {
   }
 
   zipPanel.classList.remove("hidden");
-  createZctaLayer();
+  showStateZips(stateCode);
   // Load ZIPs whenever the map settles after a pan/zoom - including right
   // after the fitMapToBbox() below.
   zipIdleListener = map.addListener("idle", loadVisibleZips);
@@ -210,6 +220,8 @@ function onStateChange() {
   if (bbox) fitMapToBbox(bbox);
 }
 
+// Hides the selected state's ZIPs and stops loading more. They stay in
+// zipCache, so coming back to this state shows them again instantly.
 function clearZctaLayer() {
   if (zipIdleListener) {
     google.maps.event.removeListener(zipIdleListener);
@@ -224,7 +236,27 @@ function clearZctaLayer() {
     zctaLayer = null;
   }
   loadedZips = new Set();
+  fetchedBoxes = [];
   if (zipZoomHint) zipZoomHint.classList.add("hidden");
+}
+
+function showStateZips(stateCode) {
+  if (!zipCache.has(stateCode)) {
+    zipCache.set(stateCode, { layer: createZctaLayer(), loadedZips: new Set(), fetchedBoxes: [] });
+  }
+  const entry = zipCache.get(stateCode);
+  zctaLayer = entry.layer;
+  loadedZips = entry.loadedZips;
+  fetchedBoxes = entry.fetchedBoxes;
+  zctaLayer.setMap(map);
+}
+
+function alreadyFetched([south, west, north, east]) {
+  return fetchedBoxes.some(
+    ([s, w, n, e]) =>
+      s <= south && w <= west && n >= north && e >= east &&
+      (e - w) <= (east - west) * MAX_REUSE_SPAN_RATIO
+  );
 }
 
 async function loadVisibleZips() {
@@ -242,7 +274,9 @@ async function loadVisibleZips() {
   // A view crossing the 180th meridian (western Alaska) has west > east;
   // just load the part east of the western edge.
   const east = ne.lng() < sw.lng() ? 180 : ne.lng();
-  const bbox = [sw.lat(), sw.lng(), ne.lat(), east].map((v) => v.toFixed(4)).join(",");
+  const box = [sw.lat(), sw.lng(), ne.lat(), east];
+  if (alreadyFetched(box)) return; // every ZIP in this view is already on the map
+  const bbox = box.map((v) => v.toFixed(4)).join(",");
 
   if (zipViewportAbort) zipViewportAbort.abort();
   zipViewportAbort = new AbortController();
@@ -255,6 +289,7 @@ async function loadVisibleZips() {
     ).then(parseJsonOrThrow);
     if (loadId !== stateLoadId || !zctaLayer) return; // user picked another state or reset meanwhile
 
+    if (!resp.truncated) fetchedBoxes.push(box);
     resp.geojson.features.forEach((f) => {
       const zip = f.properties.ZCTA5;
       if (!zip || loadedZips.has(zip)) return;
@@ -272,10 +307,11 @@ async function loadVisibleZips() {
 }
 
 function createZctaLayer() {
-  zctaLayer = new google.maps.Data();
-  zctaLayer.setMap(map);
+  const layer = new google.maps.Data();
 
-  zctaLayer.addListener("mouseover", (e) => {
+  // Only the visible (selected state's) layer gets events, so the handlers
+  // below can use the global zctaLayer.
+  layer.addListener("mouseover", (e) => {
     const zip = e.feature.getProperty("ZCTA5");
     if (!e.feature.getProperty("selectable")) {
       if (zip) setStatus(`ZIP ${zip} is outside ${stateName()}.`);
@@ -284,11 +320,12 @@ function createZctaLayer() {
     zctaLayer.overrideStyle(e.feature, { strokeWeight: 2.5, fillOpacity: 0.25 });
     if (zip) setStatus(`ZIP ${zip}${isZipSelected(zip) ? " (selected)" : " — click to select"}`);
   });
-  zctaLayer.addListener("mouseout", (e) => {
+  layer.addListener("mouseout", (e) => {
     zctaLayer.revertStyle(e.feature);
     styleZctaFeature(e.feature);
   });
-  zctaLayer.addListener("click", (e) => onZctaClick(e.feature));
+  layer.addListener("click", (e) => onZctaClick(e.feature));
+  return layer;
 }
 
 function stateName() {

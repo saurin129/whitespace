@@ -49,8 +49,9 @@ i.e. not covered by any location within that radius.
 - Pick a state and the map zooms to it. Once you're zoomed in to about
   county level, ZIP code (ZCTA) outlines appear for the part of the map
   you're looking at, and more load as you pan. Hover a ZIP to preview it,
-  click to select it (up to 3 at once). ZIPs just across the state line are
-  drawn faintly but can't be selected.
+  click to select it (up to 3 at once). Only the selected state's ZIPs are
+  shown. Each state's loaded ZIPs stay in the browser for the session, so
+  switching back to a state doesn't reload areas you've already viewed.
 - ZIP outlines come from the `zctas` database table (see "Data store"
   below). Without a database, the app falls back to querying the Census
   Bureau's TIGERweb service for the visible area directly — slower, and

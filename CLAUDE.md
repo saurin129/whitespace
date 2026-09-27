@@ -198,13 +198,19 @@ pass itself is not built yet.
   minimum zoom ("zoom in to see ZIP codes" below it), refetching on pan; (2) search
   fetches only the 1-3 selected ZIPs **by code**; (3) source both from a `zctas` table in
   Postgres, with a small **envelope (bbox)** TIGERweb query as the fallback when
-  `DATABASE_URL` is unset - never the full state polygon. ZIPs across a state line may
-  render but must not be selectable (search stays scoped to the selected state).
+  `DATABASE_URL` is unset - never the full state polygon. Only the selected state's ZIPs
+  are returned from the DB (per user, 2026-09-27: near borders neighbours were most of the
+  payload - RI 743 ZIPs/266 KB -> 81/33 KB; same query time). The TIGERweb fallback can't
+  filter by state, so it still returns neighbours; the frontend's `selectable` handling
+  (faint, unclickable) exists for that case. Search stays scoped to the selected state.
   **Implemented 2026-09-27** (`fetch_zctas_in_bbox`, `fetch_zcta_polygons`,
   `tile_zcta_parts` in `app.py`; `loadVisibleZips` in `app.js`, `MIN_ZIP_ZOOM = 9`).
   Measured locally: dense viewports (NYC, LA at max 8-degree span) <1 MB, ~0.5 s;
-  viewport responses capped at 1,500 ZIPs, keeping the selected state's ZIPs nearest the
-  view center first. Multi-part ZIPs are searched per part, with near-duplicate tiles
+  viewport responses capped at 1,500 ZIPs, keeping those nearest the view center.
+  Browser-side, `zipCache` keeps each state's Data layer + loaded ZIPs + already-fetched
+  viewports for the session; switching states hides/shows layers, and a view is only
+  re-requested if no earlier fetch covered it at <=2x its span (`MAX_REUSE_SPAN_RATIO`).
+  Reset (`resetResults`) never touches ZIPs. Default radius is 2 miles. Multi-part ZIPs are searched per part, with near-duplicate tiles
   dropped and a 25-tile (= 25 billed Places calls) cap per ZIP - Alaska island ZIP 99574
   would otherwise cost 52 calls.
 - **ZCTA data = Census cartographic boundary file, bulk-loaded once.** Use
@@ -271,7 +277,7 @@ pass itself is not built yet.
    pagination cap — see Gotchas and `MCP_TOOL_SCHEMAS.md`'s `SearchRegion` type).
    Backend (rebuilt 2026-09-27, see Gotchas): `/api/zctas?state=&bbox=` returns ZIPs in
    the visible viewport from the `zctas` table (TIGERweb envelope query as no-DB
-   fallback), each flagged `selectable` if it belongs to the chosen state; the old
+   fallback), only the chosen state's ZIPs (DB path); the old
    whole-state `fetch_state_zctas()` and its disk cache are gone. `/api/search-zips`
    looks up just the selected ZIPs by code and searches each independently by
    reusing the drawn-area search's tiling/point-in-polygon logic (`generate_tile_centers`

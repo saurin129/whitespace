@@ -1,0 +1,20 @@
+# Secrets - never commit your real API key
+.env
+.env.*
+!.env.example
+# Legacy config file from before keys moved to .env
+config.py
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Regenerable cache
+data/state_boundary_cache/*.json
+data/zcta_cache/*.json
+
+# OS junk
+.DS_Store
+Thumbs.db

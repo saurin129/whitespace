@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Restaurant Coverage Map</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div id="sidebar">
+  <h1>Restaurant Coverage Map</h1>
+
+  {% if not api_key %}
+  <div class="banner error">
+    No Google Maps API key configured. Set <code>GOOGLE_MAPS_API_KEY</code> in
+    <code>.env</code> (or the environment) and restart the app.
+  </div>
+  {% endif %}
+
+  <form id="search-form">
+    <label for="restaurant-name">Restaurant name</label>
+    <input type="text" id="restaurant-name" placeholder="e.g. Chipotle" required>
+
+    <label for="radius-miles">Radius (miles)</label>
+    <input type="number" id="radius-miles" min="0.1" step="0.1" value="5" required>
+
+    <label for="state-select">US state</label>
+    <select id="state-select" required>
+      <option value="" disabled selected>Select a state&hellip;</option>
+      {% for s in states %}
+      <option value="{{ s.code }}">{{ s.name }}</option>
+      {% endfor %}
+    </select>
+
+    <div id="zip-panel" class="hidden">
+      <p class="hint">Click up to 3 ZIP codes on the map to search (hover to preview). Google's search results cap out per query, so a state search is scoped to specific ZIPs instead of the whole state.</p>
+      <div id="zip-chips"></div>
+    </div>
+
+    <div class="or-divider">or</div>
+
+    <label>Custom search area</label>
+    <p class="hint">Draw a shape on the map to search that area instead of the whole state &mdash; like Zillow's draw-an-area search.</p>
+    <div class="button-row">
+      <button type="button" id="draw-btn">Draw search area</button>
+      <button type="button" id="finish-draw-btn" class="hidden" disabled>Finish area</button>
+      <button type="button" id="clear-draw-btn" class="secondary hidden">Clear</button>
+    </div>
+
+    <button type="submit" id="search-btn">Search</button>
+  </form>
+
+  <div id="status"></div>
+
+  <div id="legend" class="hidden">
+    <div class="legend-row"><span class="swatch covered"></span> Covered (within radius)</div>
+    <div class="legend-row"><span class="swatch uncovered"></span> Not covered</div>
+  </div>
+
+  <div id="results"></div>
+</div>
+
+<div id="map"></div>
+
+<!-- Turf.js for the polygon math (union of circles, difference against the state shape) -->
+<script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script src="https://maps.googleapis.com/maps/api/js?key={{ api_key }}&callback=initMap" async defer></script>
+</body>
+</html>

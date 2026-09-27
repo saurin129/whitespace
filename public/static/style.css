@@ -227,8 +227,8 @@ button#search-btn:hover:not(:disabled) {
   border-radius: 3px;
 }
 
-.swatch.covered { background: rgba(56, 142, 60, 0.35); border: 1px solid #2e7d32; }
-.swatch.uncovered { background: rgba(211, 47, 47, 0.35); border: 1px solid #c62828; }
+.swatch.covered { background: rgba(139, 92, 246, 0.45); border: 1px solid #7c3aed; }
+.swatch.uncovered { background: rgba(249, 115, 22, 0.45); border: 1px solid #ea580c; }
 
 #results {
   margin-top: 16px;
@@ -333,3 +333,29 @@ button#search-btn.loading:disabled { background: #3866f2; cursor: progress; }
   button#search-btn .spinner,
   #map-loading-bar::after { animation-duration: 3s; }
 }
+
+/* ZIP code label that follows the cursor over a ZIP (see app.js). */
+#zip-hover-label {
+  position: fixed;
+  z-index: 20;
+  pointer-events: none;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: rgba(31, 36, 48, 0.92);
+  color: white;
+  font-size: 12px;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+}
+
+#zip-hover-label strong {
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+#zip-hover-label span {
+  margin-left: 4px;
+  color: #c9cddb;
+}
+
+#zip-hover-label.hidden { display: none; }

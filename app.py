@@ -300,6 +300,8 @@ MAX_CIRCLES_PER_AREA = 25  # per ZIP or drawn area; each circle is at least one 
 DUPLICATE_TILE_MILES = 1.0
 CIRCLE_MARGIN_MILES = 0.1  # slack so points right on the ZIP's edge are inside the circle
 MAX_PARALLEL_PLACES_CALLS = 6
+MAX_ZIPS_PER_SEARCH = 10  # the browser warns above 5 (slower, may be incomplete)
+MAX_CIRCLES_PER_SEARCH = 60  # across all ZIPs in one search; city ZIPs need ~1 each
 
 
 def enclosing_circle(points):
@@ -706,7 +708,7 @@ def api_search_area():
 
 @app.route("/api/search-zips", methods=["POST"])
 def api_search_zips():
-    """Search a restaurant chain across up to 3 selected ZIP codes (ZCTAs)
+    """Search a restaurant chain across up to 10 selected ZIP codes (ZCTAs)
     within a state - the default browser search mode now (see CLAUDE.md
     Gotchas on why whole-state Text Search was replaced with this).
 
@@ -734,8 +736,8 @@ def api_search_zips():
         return jsonify({"error": "A valid state_code is required."}), 400
     if not zip_codes:
         return jsonify({"error": "At least one zip_code is required."}), 400
-    if len(zip_codes) > 3:
-        return jsonify({"error": "At most 3 zip codes can be searched at once."}), 400
+    if len(zip_codes) > MAX_ZIPS_PER_SEARCH:
+        return jsonify({"error": f"At most {MAX_ZIPS_PER_SEARCH} zip codes can be searched at once."}), 400
     bad = [z for z in zip_codes if not ZIP_RE.match(z)]
     if bad:
         return jsonify({"error": f"Not a 5-digit zip code: {', '.join(bad)}"}), 400
@@ -762,6 +764,11 @@ def api_search_zips():
         any_zip_truncated = any_zip_truncated or truncated
         circle_zips.extend([zip_code] * len(zip_circles))
         circles.extend(zip_circles)
+    if len(circles) > MAX_CIRCLES_PER_SEARCH:
+        # Many big rural ZIPs at once - keep cost and time bounded (each
+        # circle is a billed call; Vercel stops the function at 60s).
+        circles, circle_zips = circles[:MAX_CIRCLES_PER_SEARCH], circle_zips[:MAX_CIRCLES_PER_SEARCH]
+        any_zip_truncated = True
 
     per_zip_result_counts = {z: 0 for z in zip_codes}
     outcomes = search_circles(circles, restaurant_name, api_key)

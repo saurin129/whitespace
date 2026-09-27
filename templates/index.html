@@ -33,9 +33,10 @@
     </select>
 
     <div id="zip-panel" class="hidden">
-      <p class="hint">Click up to 3 ZIP codes on the map to search (hover to preview). Google's search results cap out per query, so a state search is scoped to specific ZIPs instead of the whole state.</p>
+      <p class="hint">Click up to 10 ZIP codes on the map to search (hover to preview). Google's search results cap out per query, so a state search is scoped to specific ZIPs instead of the whole state.</p>
       <p id="zip-zoom-hint" class="hint zoom-hint hidden">Zoom in to see ZIP codes.</p>
       <div id="zip-chips"></div>
+      <p id="zip-count-warning" class="hint zoom-hint hidden">More than 5 ZIP codes selected &mdash; the search will take longer and not all results may load.</p>
     </div>
 
     <div class="or-divider">or</div>
@@ -67,6 +68,7 @@
 
 <div id="map"></div>
 <div id="map-loading-bar" class="hidden" role="progressbar" aria-label="Searching"></div>
+<div id="zip-hover-label" class="hidden" aria-hidden="true"></div>
 
 <!-- Turf.js for the polygon math (union of circles, difference against the state shape) -->
 <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>

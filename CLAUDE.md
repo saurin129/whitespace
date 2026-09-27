@@ -14,7 +14,7 @@ the gaps, and where's the best new location in one of those gaps?"
 
 ## Current state
 
-**Built and working:** the Flask app itself — search a restaurant chain by up to 3
+**Built and working:** the Flask app itself — search a restaurant chain by up to 10
 ZIP codes (ZCTAs) within a US state (hover to preview, click to select; ZIP outlines
 load for the visible map area from the `zctas` table), or by a freehand-drawn map area, plot locations + radius
 circles, shade the uncovered area. Deployable to Vercel as-is (see README's "Deploying
@@ -218,6 +218,27 @@ pass itself is not built yet.
   Reset (`resetResults`) never touches ZIPs. Default radius is 2 miles. Multi-part ZIPs are searched per part, with near-duplicate tiles
   dropped and a 25-tile (= 25 billed Places calls) cap per ZIP - Alaska island ZIP 99574
   would otherwise cost 52 calls.
+- **Coverage rendering (2026-09-27):** radius circles are outline-only; the covered area
+  is filled once as `turf.intersect(region, union of circles)` (`coveredLayer`), the
+  uncovered as `turf.difference` - per-circle fills stacked into opaque green in dense
+  areas. Colours in `COVERED`/`UNCOVERED` in `app.js`: covered is **purple**, not covered
+  **orange** (user's choice - green blended into Google's parks); legend swatches in
+  `style.css` match. Circles and coverage layers are `clickable: false` so
+  ZIPs underneath stay hoverable/clickable after a search; selected-ZIP fill fades to an
+  outline while coverage is shown. A cursor-following ZIP label (`#zip-hover-label`,
+  `updateZipHoverLabel()`) shows the ZIP and whether a click selects/removes it.
+- **ZIP areas don't cover unpopulated land - not a bug.** ZCTAs are built from census
+  blocks with residential addresses, so federal/military/empty land has no ZIP area:
+  56% of Nevada (e.g. Sugar Bunker in the Nevada National Security Site, the Nellis
+  range) - confirmed against the Census TIGERweb server too. Users searching there should
+  use Draw search area.
+- **ZIP selection limit is 10 (user request, 2026-09-27), warning above 5.**
+  `MAX_SELECTED_ZIPS` / `ZIP_WARNING_THRESHOLD` in `app.js`, `MAX_ZIPS_PER_SEARCH` in
+  `app.py`. The original max of 3 was tied to the old whole-area Places truncation, which
+  per-ZIP fitted circles removed. Big rural ZIPs can need up to 25 circles each, so one
+  search is capped at `MAX_CIRCLES_PER_SEARCH = 60` (sets `any_zip_truncated`) to bound
+  cost and stay under Vercel's 60 s. `MCP_TOOL_SCHEMAS.md`'s `SearchRegion` still says
+  maxItems 3 - revisit when building Coverage MCP.
 - **ZIP outlines must be hidden while drawing a search area.** The ZIP `Data` layer sits
   above the map and swallows clicks, so draw-mode clicks selected ZIPs instead of placing
   vertices (found in Playwright with real mouse clicks: 1 of 4 points placed, 3 ZIPs

@@ -16,7 +16,14 @@ let markers = [];
 let circles = [];
 let stateOutlineLayer = null;
 let uncoveredLayer = null;
+let coveredLayer = null;
 let infoWindow;
+
+// Coverage colours - brighter than Google's muted basemap so they read at a glance.
+// Covered purple / not covered orange (user's choice): green blended into
+// Google's parks, and orange next to red was too close to tell apart.
+const COVERED = { fill: "#8b5cf6", stroke: "#7c3aed" };
+const UNCOVERED = { fill: "#f97316", stroke: "#ea580c" };
 
 // Google deprecated the Maps JavaScript API's Drawing library (Aug 2025,
 // unavailable as of May 2026), so the search-area shape is built by hand:
@@ -29,7 +36,7 @@ let stateSelect;
 
 let drawBtn, finishDrawBtn, clearDrawBtn;
 
-// ZIP (ZCTA) selector: click up to 3 ZIP codes on the map to scope a search,
+// ZIP (ZCTA) selector: click up to 10 ZIP codes on the map to scope a search,
 // instead of searching an entire state - see CLAUDE.md Gotchas on why
 // (Google's Text Search silently truncates for whole-state chain searches).
 //
@@ -40,7 +47,8 @@ let drawBtn, finishDrawBtn, clearDrawBtn;
 // Each state's loaded ZIPs are kept in the browser (zipCache) for the whole
 // session: switching to another state just hides them, and switching back
 // shows them again without re-requesting areas already viewed.
-const MAX_SELECTED_ZIPS = 3;
+const MAX_SELECTED_ZIPS = 10; // server enforces the same limit (MAX_ZIPS_PER_SEARCH)
+const ZIP_WARNING_THRESHOLD = 5; // above this, warn that the search is slower and may be incomplete
 const MIN_ZIP_ZOOM = 9; // roughly county level
 // A view is re-requested only if no earlier request for this state covered
 // it at a similar zoom - outlines are simplified to ~1px for the view they
@@ -82,6 +90,7 @@ function initMap() {
   clearDrawBtn.addEventListener("click", onClearOrCancelClick);
 
   addResetControl();
+  initZipHoverLabel();
 }
 
 function addResetControl() {
@@ -211,6 +220,7 @@ function suspendZipLayer() {
   }
   if (zctaLayer) zctaLayer.setMap(null);
   if (zipZoomHint) zipZoomHint.classList.add("hidden");
+  hideZipHoverLabel();
 }
 
 function resumeZipLayer() {
@@ -267,6 +277,7 @@ function clearZctaLayer() {
   loadedZips = new Set();
   fetchedBoxes = [];
   if (zipZoomHint) zipZoomHint.classList.add("hidden");
+  hideZipHoverLabel();
 }
 
 function showStateZips(stateCode) {
@@ -342,6 +353,8 @@ function createZctaLayer() {
   // below can use the global zctaLayer.
   layer.addListener("mouseover", (e) => {
     const zip = e.feature.getProperty("ZCTA5");
+    hoveredZipFeature = e.feature;
+    updateZipHoverLabel();
     if (!e.feature.getProperty("selectable")) {
       if (zip) setStatus(`ZIP ${zip} is outside ${stateName()}.`);
       return;
@@ -352,9 +365,53 @@ function createZctaLayer() {
   layer.addListener("mouseout", (e) => {
     zctaLayer.revertStyle(e.feature);
     styleZctaFeature(e.feature);
+    if (hoveredZipFeature === e.feature) hideZipHoverLabel();
   });
-  layer.addListener("click", (e) => onZctaClick(e.feature));
+  layer.addListener("click", (e) => {
+    onZctaClick(e.feature);
+    updateZipHoverLabel(); // "click to select" -> "selected"
+  });
   return layer;
+}
+
+// ZIP code label that follows the cursor while hovering a ZIP, so picking
+// one isn't guesswork. Positioned from the map div's own mousemove events
+// (google.maps.Data has no mousemove event of its own).
+let hoveredZipFeature = null;
+let zipHoverLabel = null;
+let lastMouse = { x: 0, y: 0 };
+
+function initZipHoverLabel() {
+  zipHoverLabel = document.getElementById("zip-hover-label");
+  document.getElementById("map").addEventListener("mousemove", (e) => {
+    lastMouse = { x: e.clientX, y: e.clientY };
+    if (hoveredZipFeature) positionZipHoverLabel();
+  });
+  document.getElementById("map").addEventListener("mouseleave", hideZipHoverLabel);
+}
+
+function updateZipHoverLabel() {
+  if (!zipHoverLabel || !hoveredZipFeature) return;
+  const zip = hoveredZipFeature.getProperty("ZCTA5");
+  if (!zip) return hideZipHoverLabel();
+  let hint;
+  if (!hoveredZipFeature.getProperty("selectable")) hint = `outside ${stateName()}`;
+  else if (isZipSelected(zip)) hint = "selected · click to remove";
+  else if (selectedZips.length >= MAX_SELECTED_ZIPS) hint = `max ${MAX_SELECTED_ZIPS} selected`;
+  else hint = "click to select";
+  zipHoverLabel.innerHTML = `<strong>${escapeHtml(zip)}</strong> <span>${escapeHtml(hint)}</span>`;
+  zipHoverLabel.classList.remove("hidden");
+  positionZipHoverLabel();
+}
+
+function positionZipHoverLabel() {
+  zipHoverLabel.style.left = `${lastMouse.x + 14}px`;
+  zipHoverLabel.style.top = `${lastMouse.y + 16}px`;
+}
+
+function hideZipHoverLabel() {
+  hoveredZipFeature = null;
+  if (zipHoverLabel) zipHoverLabel.classList.add("hidden");
 }
 
 function stateName() {
@@ -377,7 +434,9 @@ function styleZctaFeature(feature) {
   const selected = isZipSelected(feature.getProperty("ZCTA5"));
   zctaLayer.overrideStyle(feature, {
     fillColor: selected ? "#3866f2" : "#4a5068",
-    fillOpacity: selected ? 0.3 : 0.04,
+    // While coverage shading is showing, keep selected ZIPs to a blue
+    // outline so the blue fill doesn't tint the green/red underneath.
+    fillOpacity: selected ? (coveredLayer || uncoveredLayer ? 0.04 : 0.3) : 0.04,
     strokeColor: selected ? "#3866f2" : "#4a5068",
     strokeOpacity: selected ? 1 : 0.8,
     strokeWeight: selected ? 2.5 : 1.5,
@@ -412,7 +471,7 @@ function onZctaClick(feature) {
   setStatus(
     selectedZips.length
       ? `${selectedZips.length} ZIP code${selectedZips.length === 1 ? "" : "s"} selected.`
-      : "Click up to 3 ZIP codes on the map."
+      : `Click up to ${MAX_SELECTED_ZIPS} ZIP codes on the map.`
   );
 }
 
@@ -443,6 +502,9 @@ function updateZipChips() {
   zipChips.querySelectorAll(".zip-chip-remove").forEach((btn) => {
     btn.addEventListener("click", () => removeZip(btn.dataset.zip));
   });
+  document
+    .getElementById("zip-count-warning")
+    .classList.toggle("hidden", selectedZips.length <= ZIP_WARNING_THRESHOLD);
 }
 
 function removeZip(zip) {
@@ -458,7 +520,7 @@ function removeZip(zip) {
 function clearZipSelection() {
   selectedZips = [];
   if (zctaLayer) zctaLayer.forEach(styleZctaFeature);
-  if (zipChips) zipChips.innerHTML = "";
+  if (zipChips) updateZipChips();
 }
 
 function fitMapToZips(zips) {
@@ -490,6 +552,11 @@ function clearResults() {
     uncoveredLayer.setMap(null);
     uncoveredLayer = null;
   }
+  if (coveredLayer) {
+    coveredLayer.setMap(null);
+    coveredLayer = null;
+  }
+  if (zctaLayer) zctaLayer.forEach(styleZctaFeature); // restore full selected-ZIP fill
   document.getElementById("results").innerHTML = "";
   document.getElementById("legend").classList.add("hidden");
 }
@@ -650,15 +717,18 @@ function renderLocations(locations, radiusMiles) {
     });
     markers.push(marker);
 
+    // Outline only: the covered area is filled once as a single shape in
+    // computeAndRenderCoverage(). Filling every circle made overlapping
+    // circles stack into solid green in dense areas.
     const circle = new google.maps.Circle({
       center: position,
       radius: radiusMeters,
       map,
-      strokeColor: "#2e7d32",
-      strokeOpacity: 0.8,
+      clickable: false, // let hovers/clicks reach the ZIP outlines underneath
+      strokeColor: COVERED.stroke,
+      strokeOpacity: 0.7,
       strokeWeight: 1,
-      fillColor: "#388e3c",
-      fillOpacity: 0.18,
+      fillOpacity: 0,
     });
     circles.push(circle);
   });
@@ -670,6 +740,7 @@ function computeAndRenderCoverage(regionGeometry, locations, radiusMiles) {
 
     if (!locations.length) {
       drawUncovered(regionFeature);
+      if (zctaLayer) zctaLayer.forEach(styleZctaFeature); // fade selected-ZIP fill
       return;
     }
 
@@ -699,6 +770,11 @@ function computeAndRenderCoverage(regionGeometry, locations, radiusMiles) {
     if (uncovered) {
       drawUncovered(uncovered);
     }
+    const covered = turf.intersect(regionFeature, unioned);
+    if (covered) {
+      coveredLayer = drawCoverageLayer(covered, COVERED, 0.3);
+    }
+    if (zctaLayer) zctaLayer.forEach(styleZctaFeature); // fade selected-ZIP fill
   } catch (err) {
     console.warn("Coverage shading skipped due to a geometry error:", err);
     setStatus(
@@ -710,15 +786,21 @@ function computeAndRenderCoverage(regionGeometry, locations, radiusMiles) {
 }
 
 function drawUncovered(feature) {
-  uncoveredLayer = new google.maps.Data();
-  uncoveredLayer.addGeoJson(feature);
-  uncoveredLayer.setStyle({
-    fillColor: "#d32f2f",
-    fillOpacity: 0.28,
-    strokeColor: "#c62828",
+  uncoveredLayer = drawCoverageLayer(feature, UNCOVERED, 0.32);
+}
+
+function drawCoverageLayer(feature, colors, fillOpacity) {
+  const layer = new google.maps.Data();
+  layer.addGeoJson(feature);
+  layer.setStyle({
+    clickable: false, // let hovers/clicks reach the ZIP outlines underneath
+    fillColor: colors.fill,
+    fillOpacity,
+    strokeColor: colors.stroke,
     strokeWeight: 1,
   });
-  uncoveredLayer.setMap(map);
+  layer.setMap(map);
+  return layer;
 }
 
 function renderResultsList(locations, radiusMiles) {

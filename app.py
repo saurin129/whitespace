@@ -19,6 +19,7 @@ import os
 import re
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -297,26 +298,69 @@ def fetch_zcta_polygons(zip_codes):
 
 MAX_TILES_PER_ZIP = 25  # same ceiling as a drawn area; each tile is one billed Places call
 DUPLICATE_TILE_MILES = 1.0
+CIRCLE_MARGIN_MILES = 0.1  # slack so points right on the ZIP's edge are inside the circle
+MAX_PARALLEL_PLACES_CALLS = 6
 
 
-def tile_zcta_parts(parts):
-    """Search-tile centers covering every part of a (possibly multi-part) ZIP.
+def enclosing_circle(points):
+    """(lat, lng, radius_miles) of a circle around [[lat, lng], ...]: centered
+    on the bounding box, radius out to the farthest point. Not the smallest
+    possible circle, but within a few percent of it for ZIP-shaped areas."""
+    lats = [p[0] for p in points]
+    lngs = [p[1] for p in points]
+    lat = (min(lats) + max(lats)) / 2
+    lng = (min(lngs) + max(lngs)) / 2
+    radius = max(haversine_miles(lat, lng, p_lat, p_lng) for p_lat, p_lng in points)
+    return lat, lng, radius + CIRCLE_MARGIN_MILES
 
-    Multi-part ZIPs are mostly island chains, whose parts sit close together
-    and would otherwise each get their own near-identical tile (ZIP 99574 in
-    Alaska: 35 parts, 52 tiles). Near-duplicate tiles are dropped, and the
-    total is capped at MAX_TILES_PER_ZIP. Returns (centers, truncated).
+
+def zip_search_circles(parts):
+    """Nearby Search circles covering a (possibly multi-part) ZIP, as
+    [(lat, lng, radius_miles), ...], plus whether the tile cap cut it short.
+
+    Each circle is fitted to the ZIP rather than a fixed 25 miles, and
+    searched nearest-first (google_places_nearest), so paging stops at the
+    circle's edge. With the old 25-mile circles Google's 60-result cap (3
+    pages, with a required ~2s pause before each later page) was hit on
+    nearly every search in a city, making it slow and able to drop in-ZIP
+    locations that didn't make the top 60. A fitted circle usually needs
+    one page.
+
+    - Whole ZIP fits in one circle <= MAX_TILE_RADIUS_MILES (almost always):
+      one circle.
+    - Otherwise parts are grouped greedily into shared fitted circles of
+      at most 25 miles (island chains: Alaska's 35-part ZIP 99574 needs a
+      handful instead of one per island), and any single part too big for
+      one circle gets a grid of 25-mile circles (large rural ZIPs).
+    Capped at MAX_TILES_PER_ZIP circles (one billed call each, at minimum).
     """
-    centers, truncated = [], False
-    for part in parts:
-        part_tiles, part_truncated = generate_tile_centers(part)
-        truncated = truncated or part_truncated
-        for lat, lng in part_tiles:
-            if all(haversine_miles(lat, lng, c_lat, c_lng) > DUPLICATE_TILE_MILES for c_lat, c_lng in centers):
-                centers.append((lat, lng))
-    if len(centers) > MAX_TILES_PER_ZIP:
-        centers, truncated = centers[:MAX_TILES_PER_ZIP], True
-    return centers, truncated
+    whole = enclosing_circle([pt for part in parts for pt in part])
+    if whole[2] <= MAX_TILE_RADIUS_MILES:
+        return [whole], False
+
+    circles, truncated = [], False
+    groups = []  # lists of points, each fitting in one circle <= 25 miles
+
+    for part in sorted(parts, key=len, reverse=True):
+        if enclosing_circle(part)[2] > MAX_TILE_RADIUS_MILES:
+            part_tiles, part_truncated = generate_tile_centers(part)
+            truncated = truncated or part_truncated
+            for lat, lng in part_tiles:
+                if all(haversine_miles(lat, lng, c_lat, c_lng) > DUPLICATE_TILE_MILES
+                       for c_lat, c_lng, _ in circles):
+                    circles.append((lat, lng, MAX_TILE_RADIUS_MILES))
+            continue
+        for group in groups:
+            if enclosing_circle(group + part)[2] <= MAX_TILE_RADIUS_MILES:
+                group.extend(part)
+                break
+        else:
+            groups.append(list(part))
+
+    circles.extend(enclosing_circle(group) for group in groups)
+    if len(circles) > MAX_TILES_PER_ZIP:
+        circles, truncated = circles[:MAX_TILES_PER_ZIP], True
+    return circles, truncated
 
 
 def _tigerweb_zcta_query(params):
@@ -343,7 +387,7 @@ def _tigerweb_zcta_query(params):
         return None
 
 
-def google_places_paginated(url, base_params, api_key):
+def google_places_paginated(url, base_params, api_key, return_more=False, stop_after=None):
     """Shared pagination/backoff logic for Google Places search endpoints
     (Text Search and Nearby Search share the same status/pagination shape).
 
@@ -352,6 +396,15 @@ def google_places_paginated(url, base_params, api_key):
     so those are retried with backoff; if a later page still fails after
     retrying, pagination just stops and whatever was already found is
     returned, instead of failing the whole search.
+
+    stop_after(page_results) -> bool, if given, is checked after each page;
+    True skips the remaining pages (and their ~2s token waits) - used with
+    rank-by-distance searches once results pass the edge of the circle.
+
+    With return_more=True, returns (results, more_available): True when
+    Google still offered another page after the 3-page (60-result) cap and
+    stop_after hadn't said the rest were unneeded, i.e. matches may have
+    been left out.
     """
     results = []
     params = dict(base_params, key=api_key)
@@ -396,7 +449,12 @@ def google_places_paginated(url, base_params, api_key):
         )
         if not next_token:
             break
+        if stop_after and status == "OK" and stop_after(data.get("results", [])):
+            next_token = None
+            break
 
+    if return_more:
+        return results, bool(next_token)
     return results
 
 
@@ -406,9 +464,9 @@ def google_places_text_search(query, api_key):
     return google_places_paginated(url, {"query": query}, api_key)
 
 
-def google_places_nearby_search(lat, lng, radius_miles, keyword, api_key):
-    """Nearby Search around a point - used for the drawn-area search mode,
-    once per tile covering the drawn polygon."""
+def google_places_nearby_search(lat, lng, radius_miles, keyword, api_key, return_more=False):
+    """Nearby Search around a point - used once per tile by the drawn-area
+    search mode. See google_places_paginated for return_more."""
     url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
     radius_meters = int(min(radius_miles, MAX_TILE_RADIUS_MILES) * 1609.344)
     params = {
@@ -416,7 +474,34 @@ def google_places_nearby_search(lat, lng, radius_miles, keyword, api_key):
         "radius": radius_meters,
         "keyword": keyword,
     }
-    return google_places_paginated(url, params, api_key)
+    return google_places_paginated(url, params, api_key, return_more=return_more)
+
+
+def google_places_nearest(lat, lng, radius_miles, keyword, api_key):
+    """Every keyword match within radius_miles of a point, nearest first.
+
+    With a keyword, Nearby Search treats `radius` as a preference, not a
+    limit (measured: a 1.4-mile circle in Westwood came back with 60
+    Chipotles out to 18 miles, only 2 inside it) - so it would page through
+    all 3 pages, with a ~2s wait before each, every time. rankby=distance
+    returns strictly nearest-first instead, so paging stops at the first
+    page that reaches past the circle: usually one page, no waits.
+
+    Returns (results, more_available); more_available means 60 results
+    didn't reach the edge of the circle, so some may be missing.
+    """
+    url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+    params = {"location": f"{lat},{lng}", "rankby": "distance", "keyword": keyword}
+
+    def past_circle(page):
+        return any(
+            haversine_miles(lat, lng, r["geometry"]["location"]["lat"], r["geometry"]["location"]["lng"])
+            > radius_miles
+            for r in page
+            if r.get("geometry", {}).get("location")
+        )
+
+    return google_places_paginated(url, params, api_key, return_more=True, stop_after=past_circle)
 
 
 @app.route("/")
@@ -620,12 +705,11 @@ def api_search_zips():
     within a state - the default browser search mode now (see CLAUDE.md
     Gotchas on why whole-state Text Search was replaced with this).
 
-    Each ZIP is searched independently by tiling Nearby Search over that
-    ZCTA's own polygon and filtering results to points actually inside it -
-    the exact same tiling/point-in-polygon logic /api/search-area already
-    uses for a hand-drawn shape, just applied to a ZCTA's polygon instead.
-    A ZIP is small enough that this is almost always a single tile/call.
-    Multi-part ZIPs (islands etc.) tile each part.
+    Each ZIP is searched with Nearby Search circles fitted to its outline
+    (see zip_search_circles - almost always one circle), results filtered to
+    points actually inside the ZIP. All circles run in parallel.
+    any_zip_truncated is true if Google's 60-result cap or the per-ZIP
+    circle cap may have left locations out.
     """
     api_key = get_places_api_key()
     if not api_key:
@@ -663,25 +747,36 @@ def api_search_zips():
         }), 400
 
     by_place_id = {}
-    per_zip_result_counts = {}
     any_zip_truncated = False
     errors = []
 
+    # Every circle for every selected ZIP, searched in parallel - each one
+    # can spend several seconds in Places' between-page pauses.
+    tasks = []  # (zip_code, lat, lng, radius_miles)
     for zip_code in zip_codes:
-        parts = zctas[zip_code]["polygons"]
-        tile_centers, truncated = tile_zcta_parts(parts)
+        circles, truncated = zip_search_circles(zctas[zip_code]["polygons"])
         any_zip_truncated = any_zip_truncated or truncated
+        tasks.extend((zip_code, lat, lng, radius) for lat, lng, radius in circles)
 
-        zip_result_count = 0
-        for lat, lng in tile_centers:
-            try:
-                raw_results = google_places_nearby_search(
-                    lat, lng, MAX_TILE_RADIUS_MILES, restaurant_name, api_key
-                )
-            except (requests.RequestException, RuntimeError) as exc:
-                errors.append(str(exc))
-                continue
-            for r in raw_results:
+    def run(task):
+        _zip, lat, lng, radius = task
+        try:
+            return google_places_nearest(lat, lng, radius, restaurant_name, api_key), None
+        except (requests.RequestException, RuntimeError) as exc:
+            return None, str(exc)
+
+    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_PLACES_CALLS, len(tasks))) as pool:
+        outcomes = list(pool.map(run, tasks))  # same order as tasks
+
+    per_zip_result_counts = {z: 0 for z in zip_codes}
+    for (zip_code, _lat, _lng, _radius), (found, error) in zip(tasks, outcomes):
+        if error:
+            errors.append(error)
+            continue
+        raw_results, more_available = found
+        any_zip_truncated = any_zip_truncated or more_available
+        parts = zctas[zip_code]["polygons"]
+        for r in raw_results:
                 loc = r.get("geometry", {}).get("location", {})
                 p_lat, p_lng = loc.get("lat"), loc.get("lng")
                 if p_lat is None or p_lng is None:
@@ -699,8 +794,7 @@ def api_search_zips():
                         "lng": p_lng,
                         "zip_code": zip_code,
                     }
-                    zip_result_count += 1
-        per_zip_result_counts[zip_code] = zip_result_count
+                    per_zip_result_counts[zip_code] += 1
 
     if not by_place_id and errors:
         return jsonify({"error": errors[0]}), 502

@@ -564,7 +564,7 @@ async function searchZips(restaurantName, radiusMiles, stateCode, zips) {
     `Showing ${searchResp.locations.length} location${searchResp.locations.length === 1 ? "" : "s"} ` +
     `across ${zips.length} ZIP code${zips.length === 1 ? "" : "s"} with a ${radiusMiles}-mile radius.`;
   if (searchResp.any_zip_truncated) {
-    msg += " Note: at least one ZIP needed more sub-searches than the cap allows, so results there may be incomplete.";
+    msg += " Note: Google capped the results for at least one ZIP, so some locations there may be missing.";
   }
   setStatus(msg, !!searchResp.any_zip_truncated);
 }

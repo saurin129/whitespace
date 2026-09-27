@@ -21,9 +21,10 @@ circles, shade the uncovered area. Deployable to Vercel as-is (see README's "Dep
 to Vercel" section) — the app is structured for that (static assets in
 `public/static/`, cache dir falls back to `/tmp` under `os.environ["VERCEL"]`,
 `vercel.json` sets `maxDuration`). Live at https://whitespace-lyart-zeta.vercel.app.
-**Fixed locally, not yet deployed (2026-09-27):** the ZIP selector/search returned nothing
-for large states (CA, TX) on the live site. Rebuilt as viewport-based loading from the
-`zctas` table - see Gotchas and Roadmap item 1. Needs commit + push + a Vercel check.
+**Deployed 2026-09-27** (branch `fix-large-state-zips` fast-forward merged into `main`,
+`16b1f25`): ZIP selector/search rebuilt on the `zctas` table (large states work), nearest-
+first fitted-circle searches, loading indicator, clearer coverage map, up to 10 ZIPs.
+Verified live: map loads, `/api/zctas` served from the database in ~0.2 s.
 
 **Designed but not built:** the MCP + agent layer itself (five tools — Coverage,
 Traffic, Demographics, Sentiment, and a `rank_candidates` synthesis tool) and the LLM
@@ -190,6 +191,11 @@ pass itself is not built yet.
   Google Cloud only allows one restriction type per key, so a single shared key can't be
   both referrer-restricted and reliably used server-side — see README's Vercel section.
   Locally on `127.0.0.1` this distinction barely matters; it matters a lot once public.
+- **The map only loads on the production URL (and 127.0.0.1:5001).** The browser key is
+  referrer-restricted to `whitespace-lyart-zeta.vercel.app`; Vercel's per-deployment and
+  branch-preview URLs get Google's "Oops! Something went wrong" map error
+  (`RefererNotAllowedMapError`). Expected, not a bug - test on the production URL or
+  locally. Don't add a `*.vercel.app` wildcard to the key (any Vercel site could use it).
 - **Static assets live only in `public/static/`** (`app.py`'s `static_folder`). The old
   top-level `static/` duplicate was deleted 2026-09-26 - don't recreate it.
 - **Whole-state ZCTA loading doesn't work for large states - don't go back to it.**

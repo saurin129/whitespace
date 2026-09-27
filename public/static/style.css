@@ -57,6 +57,13 @@ form input, form select {
   margin-top: 6px;
 }
 
+p.zoom-hint {
+  color: #8a6300;
+  font-weight: 600;
+}
+
+p.zoom-hint.hidden { display: none; }
+
 #zip-chips {
   display: flex;
   flex-wrap: wrap;
@@ -245,4 +252,24 @@ button#search-btn:hover:not(:disabled) {
 .result-item .addr {
   color: #6a6f80;
   font-size: 12px;
+}
+
+/* "Reset map" button, placed on the map itself via map.controls. Styled to
+   match Google's own map controls. */
+.map-control-btn {
+  margin: 10px;
+  padding: 0 14px;
+  height: 40px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #1f2430;
+  background: white;
+  border: none;
+  border-radius: 2px;
+  box-shadow: rgba(0, 0, 0, 0.3) 0 1px 4px -1px;
+  cursor: pointer;
+}
+
+.map-control-btn:hover {
+  background: #ebebeb;
 }

@@ -28,12 +28,13 @@
     <select id="state-select" required>
       <option value="" disabled selected>Select a state&hellip;</option>
       {% for s in states %}
-      <option value="{{ s.code }}">{{ s.name }}</option>
+      <option value="{{ s.code }}" data-bbox="{{ s.bbox | tojson | forceescape }}">{{ s.name }}</option>
       {% endfor %}
     </select>
 
     <div id="zip-panel" class="hidden">
       <p class="hint">Click up to 3 ZIP codes on the map to search (hover to preview). Google's search results cap out per query, so a state search is scoped to specific ZIPs instead of the whole state.</p>
+      <p id="zip-zoom-hint" class="hint zoom-hint hidden">Zoom in to see ZIP codes.</p>
       <div id="zip-chips"></div>
     </div>
 

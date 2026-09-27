@@ -18,6 +18,14 @@ off," not a broken app.
 
 import os
 from contextlib import contextmanager
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+# Load .env here too (app.py does the same), so scripts that import db
+# directly - migrations/apply.py, scripts/import_zctas.py - see DATABASE_URL.
+# No-op on Vercel; never overrides a variable already set in the environment.
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 try:
     import psycopg2

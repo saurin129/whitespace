@@ -46,10 +46,15 @@ i.e. not covered by any location within that radius.
 
 ### ZIP code search (state dropdown)
 
-- Pick a state, and the map fills in with that state's ZIP code (ZCTA)
-  boundaries, fetched live from the Census Bureau's TIGERweb service and
-  cached to `data/zcta_cache/` after the first fetch. Hover a ZIP to
-  preview it, click to select it (up to 3 at once).
+- Pick a state and the map zooms to it. Once you're zoomed in to about
+  county level, ZIP code (ZCTA) outlines appear for the part of the map
+  you're looking at, and more load as you pan. Hover a ZIP to preview it,
+  click to select it (up to 3 at once). ZIPs just across the state line are
+  drawn faintly but can't be selected.
+- ZIP outlines come from the `zctas` database table (see "Data store"
+  below). Without a database, the app falls back to querying the Census
+  Bureau's TIGERweb service for the visible area directly — slower, and
+  it can't tell which state a ZIP belongs to.
 - The backend searches each selected ZIP independently — Google Places
   Text Search silently truncates results for broad "restaurant in a whole
   state" queries (it's not built for exhaustively enumerating a chain's
@@ -127,13 +132,14 @@ in `app.py`) can take several seconds on a multi-page search. `vercel.json` sets
 `maxDuration: 60` for this reason — if you're on a plan where that's not allowed, lower
 it, but a very large state search may then time out before finishing all 3 pages.
 
-## Data store (optional, for the MCP tool layer)
+## Data store (recommended)
 
-The Flask app above works with zero database configured. This section only matters once
-the MCP tool layer (`MCP_TOOL_SCHEMAS.md`) gets built — the MCP tools are designed to
-read/write through a persistent store instead of hitting Places/DOT/Census/Reviews APIs
-on every agent call, and `migrations/schema.sql` + `db.py` are that store's schema and
-connection layer.
+The Flask app works with zero database configured, but the ZIP selector is faster and
+more reliable with one: ZIP outlines are served from a `zctas` table instead of the
+Census Bureau's servers. The planned MCP tool layer (`MCP_TOOL_SCHEMAS.md`) will also
+read/write through this store instead of hitting Places/DOT/Census/Reviews APIs on every
+agent call. `migrations/schema.sql` + `db.py` are the store's schema and connection
+layer.
 
 1. **Provision a Postgres database with PostGIS.** Either works, both have a free tier:
    - [Neon](https://neon.tech) — new project, then in the SQL editor or via `psql`, run
@@ -145,22 +151,30 @@ connection layer.
      and sets the connection env var for you automatically).
 2. **Run the schema** against your new database:
    ```bash
-   psql "$DATABASE_URL" -f migrations/schema.sql
+   python migrations/apply.py
+   # or, with psql installed: psql "$DATABASE_URL" -f migrations/schema.sql
    ```
    Safe to re-run — every statement is idempotent.
-3. **Set `DATABASE_URL`** — locally as an environment variable, or in Vercel's
+3. **Load the ZIP code outlines** (one time, about a minute; downloads ~70 MB from the
+   Census Bureau and uses ~110 MB of database storage):
+   ```bash
+   pip install -r requirements-dev.txt
+   python scripts/import_zctas.py
+   ```
+   ZIP outlines only change with each decennial census, so there's nothing to refresh.
+4. **Set `DATABASE_URL`** — locally as an environment variable, or in Vercel's
    Environment Variables settings for a deployed instance (same place as
    `GOOGLE_MAPS_API_KEY`), or in your local `.env` for the data-store tooling. It's
    optional infrastructure, not a required secret, so "unset" just means the app runs
    without the caching layer.
-4. **Install `psycopg2-binary`** (already in `requirements.txt`) if you haven't:
+5. **Install `psycopg2-binary`** (already in `requirements.txt`) if you haven't:
    `pip install -r requirements.txt`.
 
 `db.py`'s `DB_ENABLED` flag is `False` whenever `DATABASE_URL` is unset (or
 `psycopg2` isn't installed), so nothing that depends on the data store should crash if
-it's skipped — it should just fall back to calling the live API directly, the same way
-the on-disk boundary/ZCTA caches degrade to "no caching" rather than crashing (see
-`app.py`'s `CACHE_ENABLED`/`ZCTA_CACHE_ENABLED`).
+it's skipped — it should just fall back to calling the live API directly (as the ZIP
+selector does), the same way the on-disk state-boundary cache degrades to "no caching"
+rather than crashing (see `app.py`'s `CACHE_ENABLED`).
 
 ## Notes / limitations
 

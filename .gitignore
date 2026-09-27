@@ -13,7 +13,6 @@ venv/
 
 # Regenerable cache
 data/state_boundary_cache/*.json
-data/zcta_cache/*.json
 
 # OS junk
 .DS_Store

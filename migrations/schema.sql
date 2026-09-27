@@ -15,9 +15,37 @@
 --
 --   psql "$DATABASE_URL" -f migrations/schema.sql
 --
+-- or, without psql installed:
+--
+--   python migrations/apply.py
+--
 -- Safe to re-run - every statement is idempotent (IF NOT EXISTS / OR REPLACE).
 
 CREATE EXTENSION IF NOT EXISTS postgis;
+
+-- ---------------------------------------------------------------------------
+-- ZIP code (ZCTA) boundaries for the map's ZIP selector and ZIP search.
+--
+-- Bulk-loaded once from the Census cartographic boundary file by
+-- scripts/import_zctas.py (ZCTAs only change each decennial census, so there's
+-- no refresh job). Replaces querying TIGERweb with a whole-state polygon,
+-- which the Census WAF rejects for large states - see CLAUDE.md Gotchas.
+--
+-- GEOMETRY rather than GEOGRAPHY (unlike the point tables below): the queries
+-- here are bounding-box lookups for the visible map viewport plus
+-- ST_Simplify for zoomed-out views, both of which are cheaper and better
+-- supported on planar geometry. At ZIP scale the difference is irrelevant.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS zctas (
+    zcta5           TEXT PRIMARY KEY,           -- 5-digit ZCTA code, e.g. '02903'
+    state_codes     TEXT[] NOT NULL DEFAULT '{}', -- states it overlaps; a few ZCTAs span a state line
+    geom            GEOMETRY(MULTIPOLYGON, 4326) NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_zctas_geom
+    ON zctas USING GIST (geom);
+CREATE INDEX IF NOT EXISTS idx_zctas_state_codes
+    ON zctas USING GIN (state_codes);
 
 -- ---------------------------------------------------------------------------
 -- Coverage MCP: cached, cleaned Places search results.
@@ -81,25 +109,36 @@ CREATE INDEX IF NOT EXISTS idx_traffic_stations_state
     ON traffic_stations (state_code);
 
 -- ---------------------------------------------------------------------------
--- Demographics MCP: Census ACS tract data cache.
+-- Demographics MCP: Census tract boundaries + ACS values, as two tables.
+--
+-- Split on purpose: tract outlines only change each decennial census, but a
+-- new ACS 5-year estimate comes out every year. Keeping the polygon on the
+-- per-vintage row would store every tract outline again for each vintage
+-- (~100 MB per nationwide load) - see CLAUDE.md's storage budget. Boundaries
+-- load per state on first request, not as a nationwide backfill.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS census_tracts (
-    geoid                       TEXT NOT NULL,   -- Census tract GEOID
-    vintage_year                INTEGER NOT NULL, -- which ACS 5-year estimate this is
-    state_code                  TEXT NOT NULL,
-    population                  INTEGER,
-    median_household_income     INTEGER,
-    median_age                  DOUBLE PRECISION,
-    geom                        GEOGRAPHY(POLYGON, 4326),
-    fetched_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-    PRIMARY KEY (geoid, vintage_year)
+    geoid           TEXT PRIMARY KEY,   -- Census tract GEOID
+    state_code      TEXT NOT NULL,
+    geom            GEOGRAPHY(MULTIPOLYGON, 4326) NOT NULL, -- some tracts are multipart (islands)
+    fetched_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_census_tracts_geom
     ON census_tracts USING GIST (geom);
 CREATE INDEX IF NOT EXISTS idx_census_tracts_state
     ON census_tracts (state_code);
+
+CREATE TABLE IF NOT EXISTS census_tract_acs (
+    geoid                       TEXT NOT NULL REFERENCES census_tracts(geoid),
+    vintage_year                INTEGER NOT NULL, -- which ACS 5-year estimate this is
+    population                  INTEGER,
+    median_household_income     INTEGER,
+    median_age                  DOUBLE PRECISION,
+    fetched_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+    PRIMARY KEY (geoid, vintage_year)
+);
 
 -- ---------------------------------------------------------------------------
 -- Sentiment MCP: sampled Places reviews cache, keyed by the point + category

@@ -15,23 +15,26 @@ the gaps, and where's the best new location in one of those gaps?"
 ## Current state
 
 **Built and working:** the Flask app itself — search a restaurant chain by up to 3
-ZIP codes (ZCTAs) within a US state (hover to preview, click to select, on a live
-Census TIGERweb ZCTA layer), or by a freehand-drawn map area, plot locations + radius
+ZIP codes (ZCTAs) within a US state (hover to preview, click to select; ZIP outlines
+load for the visible map area from the `zctas` table), or by a freehand-drawn map area, plot locations + radius
 circles, shade the uncovered area. Deployable to Vercel as-is (see README's "Deploying
 to Vercel" section) — the app is structured for that (static assets in
 `public/static/`, cache dir falls back to `/tmp` under `os.environ["VERCEL"]`,
-`vercel.json` sets `maxDuration`).
+`vercel.json` sets `maxDuration`). Live at https://whitespace-lyart-zeta.vercel.app.
+**Fixed locally, not yet deployed (2026-09-27):** the ZIP selector/search returned nothing
+for large states (CA, TX) on the live site. Rebuilt as viewport-based loading from the
+`zctas` table - see Gotchas and Roadmap item 1. Needs commit + push + a Vercel check.
 
 **Designed but not built:** the MCP + agent layer itself (five tools — Coverage,
 Traffic, Demographics, Sentiment, and a `rank_candidates` synthesis tool) and the LLM
 anomaly-removal pipeline stage. See `MCP_TOOL_SCHEMAS.md` for the full tool contracts —
 that doc is current and should be treated as the spec to implement against, not notes.
 
-**Built but unprovisioned:** the Postgres/PostGIS data store's schema
-(`migrations/schema.sql`) and connection layer (`db.py`) exist and are wired for
-Vercel-serverless-appropriate use (short-lived connections, `DATABASE_URL`-only config,
-degrades to "caching off" if unset), but no actual database has been created or tested
-against yet — see Roadmap item 2.
+**Provisioned:** the Postgres/PostGIS data store (Neon, via Vercel's Storage
+integration; PostgreSQL 18, PostGIS 3.6). Schema (`migrations/schema.sql`, applied with
+`migrations/apply.py`) and connection layer (`db.py`) are live; only the `zctas` table has
+data so far (all 33,791 ZCTAs, ~111 MB; whole DB ~127 MB of the 0.5 GB free tier). Other
+tables are empty until their MCP tools are built - see Roadmap item 2.
 
 **Resolved (was "in flux"):** how a search region gets selected. Original design was
 "whole state or freehand polygon." That's now replaced with "state dropdown, then click
@@ -84,6 +87,23 @@ by topic instead; read both if picking this up cold.
     / LLM usage, drafted resume-style summary bullets, and formalized the 9-item
     roadmap as tracked tasks (task-tracker state is session-local, not durable — this
     file's Roadmap section is the durable copy of that list).
+14. (2026-09-26/27) Moved secrets from `config.py` to `.env` + `python-dotenv`; set up
+    Python 3.12 `.venv`; deleted dead `static/`; user pushed to GitHub
+    (`saurin129/whitespace`) and deployed to Vercel
+    (https://whitespace-lyart-zeta.vercel.app). Split into two Google keys (browser key
+    referrer-restricted to the Vercel domain + Maps JS only; server `GOOGLE_PLACES_API_KEY`
+    Places-only) after the referrer restriction broke server-side searches.
+15. Frontend: state selection now zooms immediately from a `data-bbox` on each
+    `<option>` (no longer waits on ZCTA + boundary fetches); added a "Reset map" map
+    control (`resetMap()` in `app.js`), keeps restaurant name + radius. Stale ZCTA
+    responses are dropped via a `stateLoadId` counter.
+16. Diagnosed the large-state ZIP bug (see Gotchas) and decided to back ZCTAs with the
+    database + viewport-based loading (see Roadmap item 2). Sized the whole data store
+    against Neon's free tier (see Gotchas: "Data store storage budget").
+17. Provisioned Neon, applied the schema (added `zctas`, split `census_tracts`),
+    imported all ZCTAs, and rebuilt the ZIP selector/search on top (viewport loading,
+    by-code search, multi-part ZIP support, per-ZIP tile cap). Removed the old
+    `data/zcta_cache/` disk cache.
 
 ## Architecture
 
@@ -144,12 +164,12 @@ pass itself is not built yet.
   exist server-side. Building Coverage MCP requires porting the circle-union +
   polygon-difference logic to Python — this is real work, not a thin wrapper, despite
   Coverage MCP otherwise being "just" a wrapper around existing search logic.
-- **This sandbox cannot run `git commit`/`git push`** against this project folder — the
-  mount blocks file deletion/overwrite, which breaks git's lock-file handling. Git setup
-  (`.gitignore`, `.env.example`) is done; `git init/add/commit/push` need to be run
-  by the user locally, not by Claude in this environment. Don't retry this from a
-  sandboxed bash tool in a future session without checking whether that restriction
-  still applies.
+- **Git: Claude can commit and push when the user asks** (verified 2026-09-27, running
+  directly on the user's Mac). An earlier sandboxed environment couldn't (mount blocked
+  git's lock files) - that no longer applies. No git identity is configured on the
+  machine; commits pass `-c user.name="Saurin" -c user.email="saurin129@gmail.com"`
+  per commit rather than changing git config. Work goes on a branch; merging to `main`
+  triggers a Vercel production deploy (branch pushes get preview deploys).
 - **All secrets come from environment variables; `.env` holds the real local keys and
   is gitignored on purpose.** `app.py` calls `load_dotenv()` at import (no-op on Vercel,
   never overrides real env vars). `.env.example` is the tracked placeholder template.
@@ -165,6 +185,62 @@ pass itself is not built yet.
   Locally on `127.0.0.1` this distinction barely matters; it matters a lot once public.
 - **Static assets live only in `public/static/`** (`app.py`'s `static_folder`). The old
   top-level `static/` duplicate was deleted 2026-09-26 - don't recreate it.
+- **Whole-state ZCTA loading doesn't work for large states - don't go back to it.**
+  `fetch_state_zctas()` POSTs the full state outline as the TIGERweb spatial filter; for
+  big states (CA 257 KB, TX 1.3 MB of geometry) the Census WAF returns an HTML
+  "Request Rejected" page, which the code swallows as `"source": "unavailable"` / empty
+  features. `/api/search-zips` calls the same function, so ZIP *search* also fails in
+  those states. Even if the request went through, a whole state's ZCTAs are far too big
+  to ship (RI's 108 ZIPs = 1.7 MB; CA ~2,000 ZIPs ~30 MB; Vercel caps function responses
+  at ~4.5 MB). Decided fix: (1) load ZCTAs for the **visible map viewport** only, above a
+  minimum zoom ("zoom in to see ZIP codes" below it), refetching on pan; (2) search
+  fetches only the 1-3 selected ZIPs **by code**; (3) source both from a `zctas` table in
+  Postgres, with a small **envelope (bbox)** TIGERweb query as the fallback when
+  `DATABASE_URL` is unset - never the full state polygon. ZIPs across a state line may
+  render but must not be selectable (search stays scoped to the selected state).
+  **Implemented 2026-09-27** (`fetch_zctas_in_bbox`, `fetch_zcta_polygons`,
+  `tile_zcta_parts` in `app.py`; `loadVisibleZips` in `app.js`, `MIN_ZIP_ZOOM = 9`).
+  Measured locally: dense viewports (NYC, LA at max 8-degree span) <1 MB, ~0.5 s;
+  viewport responses capped at 1,500 ZIPs, keeping the selected state's ZIPs nearest the
+  view center first. Multi-part ZIPs are searched per part, with near-duplicate tiles
+  dropped and a 25-tile (= 25 billed Places calls) cap per ZIP - Alaska island ZIP 99574
+  would otherwise cost 52 calls.
+- **ZCTA data = Census cartographic boundary file, bulk-loaded once.** Use
+  `https://www2.census.gov/geo/tiger/GENZ2020/shp/cb_2020_us_zcta520_500k.zip`
+  (67 MB zipped; 33,791 ZCTAs, 5.95M vertices; 111 MB in PostGIS as loaded). Loaded by
+  `scripts/import_zctas.py` (needs `requirements-dev.txt` for pyshp; ~1 min). It assigns
+  `state_codes` via the matching `cb_2020_us_state_500k` file (primary state by point-on-
+  surface, plus any state with >=1% of the ZIP's area; 118 ZIPs span 2 states), then
+  `VACUUM FULL`s - without that the post-UPDATE table sits at ~2x (199 MB measured).
+  ZCTAs only change each decennial census, so a one-time import beats lazy
+  cache-on-miss; no refresh job needed until ~2030. The 500k generalization is plenty
+  for click/hover selection; simplify further on import only if storage gets tight.
+- **Data store storage budget (Neon free tier, 0.5 GB).** Estimates: `zctas` ~100 MB,
+  `census_tracts` ~100 MB per nationwide load (tract file is 62 MB zipped),
+  `traffic_stations` ~100-250 MB if all 50 states (rough), a few MB per state;
+  `sentiment_samples` ~5 KB/business and grows; `restaurant_locations` and
+  `anomaly_log` small. Realistic demo ~220-300 MB fits; "everything nationwide + growth"
+  would not. Rules to stay under it, apply as each tool is built:
+  (a) **Traffic data loads per state on first request**, never a nationwide backfill.
+  (b) **Tract geometry is stored once, separate from ACS values** (done 2026-09-27):
+  `census_tracts` (geometry, PK `geoid`) + `census_tract_acs` (values, PK
+  `(geoid, vintage_year)`). Don't fold them back together - that stores every tract
+  polygon again per ACS vintage (~100 MB each).
+  (c) **Expire cached Google data** (see next item).
+  (d) Simplify polygons on import if needed. Upgrading to Neon's paid usage-based plan
+  is an acceptable escape hatch, not a failure.
+- **Google Maps Platform terms limit what can be stored from Places.** As understood
+  (verify against current terms before building): place IDs may be stored
+  indefinitely, lat/lng cached up to 30 days, other Places content (names, addresses,
+  ratings, review text) not meant for long-term storage. Affects `restaurant_locations`
+  and `sentiment_samples` regardless of storage size: design them around place IDs +
+  TTL/refresh, not permanent copies.
+- **Testing: local by default, not the live Vercel site** (user preference, to conserve
+  Vercel Hobby usage). Run `.venv` + `python app.py` (127.0.0.1:5001) or the Flask test
+  client; check Vercel-only limits (e.g. ~4.5 MB response cap) by measuring locally.
+  Keep Google Places calls minimal anywhere - they bill the user's Google Cloud account;
+  Census TIGERweb calls are free. One post-deploy Vercel check at the end, with the
+  user's OK.
 - **Yelp and Reddit were considered and rejected as review/sentiment sources.** Yelp's
   Reviews API caps at 3 excerpts of 160 characters each, on paid plans only — no bulk
   full-text access exists at any tier, and scraping around it violates their ToS.
@@ -191,27 +267,28 @@ pass itself is not built yet.
 1. ~~**Zip-code region selector**~~ — **built.** State dropdown, then hover-to-preview /
    click-to-select up to 3 ZCTAs on the map (max 3, tied directly to the Places
    pagination cap — see Gotchas and `MCP_TOOL_SCHEMAS.md`'s `SearchRegion` type).
-   Backend: `fetch_state_zctas()` queries TIGERweb layer 4
-   (`PUMA_TAD_TAZ_UGA_ZCTA/MapServer/4`) — this layer has no state field, so it's a
-   spatial "intersects" POST query against the state's own boundary polygon (already
-   fetched by `fetch_state_boundary()`), not a WHERE clause like the state layer uses.
-   Cached to disk the same way as state boundaries (`ZCTA_CACHE_DIR`,
-   `ZCTA_CACHE_ENABLED`). `/api/search-zips` searches each selected ZIP independently by
+   Backend (rebuilt 2026-09-27, see Gotchas): `/api/zctas?state=&bbox=` returns ZIPs in
+   the visible viewport from the `zctas` table (TIGERweb envelope query as no-DB
+   fallback), each flagged `selectable` if it belongs to the chosen state; the old
+   whole-state `fetch_state_zctas()` and its disk cache are gone. `/api/search-zips`
+   looks up just the selected ZIPs by code and searches each independently by
    reusing the drawn-area search's tiling/point-in-polygon logic (`generate_tile_centers`
    + `point_in_polygon`) against that ZIP's own polygon instead of a hand-drawn one —
    almost always a single tile per ZIP, since ZCTAs are small. Frontend: `onStateChange()`
    loads and renders the ZCTA layer as a `google.maps.Data` overlay with hover/click
    handlers; `searchZips()` unions the selected ZCTAs' geometry client-side (Turf) as the
    region to shade coverage against, per `MCP_TOOL_SCHEMAS.md`'s note that the searched
-   area is the union of selected ZCTAs, not the whole state. Verified offline (this
-   sandbox can't reach TIGERweb or Google APIs) via a fake-`flask`-module shim exercising
-   the route handlers directly — real network behavior still needs confirming by running
-   it locally.
-2. ~~**Postgres + PostGIS data store**~~ — **schema + connection layer built, not yet
-   provisioned or tested against a live database.** `migrations/schema.sql` defines 5
-   tables: `restaurant_locations` (Coverage MCP cache, with `is_closed` /
-   `duplicate_of_place_id` columns the anomaly-removal pass writes to),
-   `traffic_stations` (Traffic MCP), `census_tracts` (Demographics MCP),
+   area is the union of selected ZCTAs, not the whole state. Frontend loads ZIPs on the
+   map's `idle` event (`loadVisibleZips`) once zoom >= `MIN_ZIP_ZOOM`, adding only ZIPs
+   not already on the map. Backend verified locally against Neon + TIGERweb with Places
+   mocked; frontend verified in Node against a mocked google.maps - **not yet clicked
+   through in a real browser.**
+2. ~~**Postgres + PostGIS data store**~~ — **provisioned on Neon (2026-09-27), schema
+   applied, `zctas` loaded.** `migrations/schema.sql` defines 7 tables: `zctas` (ZIP
+   outlines for the ZIP selector, bulk-loaded), `restaurant_locations` (Coverage MCP
+   cache, with `is_closed` / `duplicate_of_place_id` columns the anomaly-removal pass
+   writes to), `traffic_stations` (Traffic MCP), `census_tracts` + `census_tract_acs`
+   (Demographics MCP),
    `sentiment_samples` (Sentiment MCP), and `anomaly_log` (the reasoning trail behind
    every anomaly-removal flag - see MCP_TOOL_SCHEMAS.md's "Data store and the
    anomaly-removal step"). `db.py` is the connection layer: `DATABASE_URL` env var only
@@ -222,11 +299,11 @@ pass itself is not built yet.
    use the provider's own pooled connection string if volume ever needs it, don't add
    pooling logic here). Table-specific read/write helpers (upsert, cached-lookup, etc.)
    deliberately aren't written yet - they belong with each MCP tool below, once that
-   tool's real query patterns are known. **What's NOT done:** an actual Neon/Supabase
-   database has not been provisioned (that's an account-creation step Claude can't do on
-   your behalf) and the schema has never been run against a live Postgres - do that via
-   README's "Data store" section, then sanity-check `migrations/schema.sql` actually
-   applies cleanly before building against it.
+   tool's real query patterns are known. `db.py` now calls `load_dotenv()` itself so
+   scripts importing it directly see `DATABASE_URL`. `app.py` imports `db` (for `zctas`).
+   `DATABASE_URL` is the pooled (`-pooler`) Neon string, set in `.env` and by the Vercel
+   integration. Temp tables don't survive the pooler across transactions - use a real
+   staging table (see `import_zctas.py`).
 3. **LLM anomaly-removal pass** — a cleaning stage between raw API responses and
    anything stored (closed-but-listed businesses, duplicate listings, stale traffic
    readings). Sits in front of whichever tool below is built first.
@@ -251,16 +328,16 @@ pass itself is not built yet.
 - `MCP_TOOL_SCHEMAS.md` — full input/output JSON Schema for all five planned MCP tools,
   the `SearchRegion` / `GeoArea` type split, and the data store / anomaly-removal design.
   Treat as current spec.
-- `migrations/schema.sql` — the data store's DDL (5 tables, see Roadmap item 2). Written
-  by hand, never run against a live database yet — sanity-check it applies cleanly before
-  building the MCP tools against it.
+- `migrations/schema.sql` — the data store's DDL (7 tables, see Roadmap item 2), applied
+  to Neon. `migrations/apply.py` runs it without psql; idempotent.
+- `scripts/import_zctas.py` — one-time nationwide ZIP outline import (see Gotchas).
 - `db.py` — the data store's connection layer (`DATABASE_URL`, `DB_ENABLED`,
-  `get_connection()`/`fetch_all()`/`execute()`). Not imported by `app.py` — only the
-  future MCP tools depend on it.
+  `get_connection()`/`fetch_all()`/`execute()`). Used by `app.py` for the ZIP selector
+  and by the scripts above; the future MCP tools will use it too.
 
 ## Git workflow
 
-Run these locally (not through Claude in this sandbox — see Gotchas):
+Initial repo setup (already done; kept for reference):
 
 ```
 git init

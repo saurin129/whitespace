@@ -9,6 +9,7 @@
 //    drawn polygon itself instead of a state outline.
 
 const MILES_TO_METERS = 1609.344;
+const US_VIEW = { center: { lat: 39.5, lng: -98.35 }, zoom: 4 }; // continental US
 
 let map;
 let markers = [];
@@ -31,15 +32,25 @@ let drawBtn, finishDrawBtn, clearDrawBtn;
 // ZIP (ZCTA) selector: click up to 3 ZIP codes on the map to scope a search,
 // instead of searching an entire state - see CLAUDE.md Gotchas on why
 // (Google's Text Search silently truncates for whole-state chain searches).
+//
+// ZIP outlines load for the visible map area only, once zoomed in to
+// MIN_ZIP_ZOOM, and more load as the user pans - a whole large state's ZIPs
+// are far too much data to send at once (see CLAUDE.md Gotchas).
 const MAX_SELECTED_ZIPS = 3;
-let zctaLayer = null; // google.maps.Data, all ZCTAs for the currently selected state
+const MIN_ZIP_ZOOM = 9; // roughly county level
+let zctaLayer = null; // google.maps.Data, ZCTAs loaded so far for the selected state
+let loadedZips = new Set(); // ZIP codes already in zctaLayer, so panning back doesn't re-add them
+let zipIdleListener = null; // map "idle" listener that loads ZIPs for the new view
+let zipViewportAbort = null; // AbortController for the in-flight viewport request
 let selectedZips = []; // [{ zip, feature: <GeoJSON Feature> }, ...] in click order, max 3
-let zipPanel, zipChips;
+let zipPanel, zipChips, zipZoomHint;
+// Bumped on every state change / reset, so a slow ZCTA response for a state
+// the user has since moved away from is dropped instead of drawn.
+let stateLoadId = 0;
 
 function initMap() {
   map = new google.maps.Map(document.getElementById("map"), {
-    center: { lat: 39.5, lng: -98.35 }, // continental US
-    zoom: 4,
+    ...US_VIEW,
     mapTypeControl: false,
     streetViewControl: false,
   });
@@ -47,6 +58,7 @@ function initMap() {
   stateSelect = document.getElementById("state-select");
   zipPanel = document.getElementById("zip-panel");
   zipChips = document.getElementById("zip-chips");
+  zipZoomHint = document.getElementById("zip-zoom-hint");
 
   document.getElementById("search-form").addEventListener("submit", onSearch);
   stateSelect.addEventListener("change", onStateChange);
@@ -58,6 +70,35 @@ function initMap() {
   drawBtn.addEventListener("click", startDrawing);
   finishDrawBtn.addEventListener("click", finishDrawing);
   clearDrawBtn.addEventListener("click", onClearOrCancelClick);
+
+  addResetControl();
+}
+
+function addResetControl() {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "map-control-btn";
+  btn.textContent = "Reset map";
+  btn.title = "Clear results, selections and drawn areas, and zoom back out";
+  btn.addEventListener("click", resetMap);
+  map.controls[google.maps.ControlPosition.TOP_RIGHT].push(btn);
+}
+
+// Clears everything on the map and the area selection (state, ZIPs, drawn
+// shape), but keeps the restaurant name and radius so the user can re-run
+// the same search somewhere else.
+function resetMap() {
+  stateLoadId++;
+  clearResults();
+  clearDrawnPolygon();
+  clearZipSelection();
+  clearZctaLayer();
+  stateSelect.value = "";
+  zipPanel.classList.add("hidden");
+  infoWindow.close();
+  map.setCenter(US_VIEW.center);
+  map.setZoom(US_VIEW.zoom);
+  setStatus("");
 }
 
 function startDrawing() {
@@ -153,48 +194,100 @@ function getDrawnPolygonPath() {
   return path.length >= 3 ? path : null;
 }
 
-async function onStateChange() {
+function onStateChange() {
   const stateCode = stateSelect.value;
+  stateLoadId++;
   clearZipSelection();
+  clearZctaLayer();
 
   if (!stateCode) {
-    if (zctaLayer) {
-      zctaLayer.setMap(null);
-      zctaLayer = null;
-    }
     zipPanel.classList.add("hidden");
     return;
   }
 
   zipPanel.classList.remove("hidden");
-  setStatus("Loading ZIP code boundaries…");
+  createZctaLayer();
+  // Load ZIPs whenever the map settles after a pan/zoom - including right
+  // after the fitMapToBbox() below.
+  zipIdleListener = map.addListener("idle", loadVisibleZips);
+
+  // Zoom right away from the bbox baked into the <option>.
+  const bbox = JSON.parse(stateSelect.selectedOptions[0].dataset.bbox || "null");
+  if (bbox) fitMapToBbox(bbox);
+}
+
+function clearZctaLayer() {
+  if (zipIdleListener) {
+    google.maps.event.removeListener(zipIdleListener);
+    zipIdleListener = null;
+  }
+  if (zipViewportAbort) {
+    zipViewportAbort.abort();
+    zipViewportAbort = null;
+  }
+  if (zctaLayer) {
+    zctaLayer.setMap(null);
+    zctaLayer = null;
+  }
+  loadedZips = new Set();
+  if (zipZoomHint) zipZoomHint.classList.add("hidden");
+}
+
+async function loadVisibleZips() {
+  const stateCode = stateSelect.value;
+  if (!stateCode || !zctaLayer) return;
+
+  const tooFar = map.getZoom() < MIN_ZIP_ZOOM;
+  zipZoomHint.classList.toggle("hidden", !tooFar);
+  if (tooFar) return;
+
+  const bounds = map.getBounds();
+  if (!bounds) return;
+  const sw = bounds.getSouthWest();
+  const ne = bounds.getNorthEast();
+  // A view crossing the 180th meridian (western Alaska) has west > east;
+  // just load the part east of the western edge.
+  const east = ne.lng() < sw.lng() ? 180 : ne.lng();
+  const bbox = [sw.lat(), sw.lng(), ne.lat(), east].map((v) => v.toFixed(4)).join(",");
+
+  if (zipViewportAbort) zipViewportAbort.abort();
+  zipViewportAbort = new AbortController();
+  const loadId = stateLoadId;
 
   try {
-    const zctaResp = await fetch(`/api/zctas?state=${encodeURIComponent(stateCode)}`).then(parseJsonOrThrow);
-    renderZctaLayer(zctaResp.geojson);
+    const resp = await fetch(
+      `/api/zctas?state=${encodeURIComponent(stateCode)}&bbox=${bbox}`,
+      { signal: zipViewportAbort.signal }
+    ).then(parseJsonOrThrow);
+    if (loadId !== stateLoadId || !zctaLayer) return; // user picked another state or reset meanwhile
 
-    const boundaryResp = await fetch(`/api/state-boundary?state=${encodeURIComponent(stateCode)}`).then(parseJsonOrThrow);
-    fitMapToBbox(boundaryResp.bbox);
-
-    setStatus("Click up to 3 ZIP codes on the map.");
+    resp.geojson.features.forEach((f) => {
+      const zip = f.properties.ZCTA5;
+      if (!zip || loadedZips.has(zip)) return;
+      loadedZips.add(zip);
+      zctaLayer.addGeoJson(f).forEach(styleZctaFeature);
+    });
+    if (resp.truncated) {
+      setStatus("This view has a lot of ZIP codes — zoom in further to see all of them.");
+    }
   } catch (err) {
+    if (err.name === "AbortError" || loadId !== stateLoadId) return;
     console.error(err);
-    setStatus(err.message || "Could not load ZIP code boundaries for this state.", true);
+    setStatus(err.message || "Could not load ZIP code boundaries for this area.", true);
   }
 }
 
-function renderZctaLayer(geojson) {
-  if (zctaLayer) {
-    zctaLayer.setMap(null);
-  }
+function createZctaLayer() {
   zctaLayer = new google.maps.Data();
-  zctaLayer.addGeoJson(geojson);
-  zctaLayer.forEach(styleZctaFeature);
   zctaLayer.setMap(map);
 
   zctaLayer.addListener("mouseover", (e) => {
-    zctaLayer.overrideStyle(e.feature, { strokeWeight: 2.5, fillOpacity: 0.25 });
     const zip = e.feature.getProperty("ZCTA5");
+    if (!e.feature.getProperty("selectable")) {
+      if (zip) setStatus(`ZIP ${zip} is outside ${stateName()}.`);
+      return;
+    }
+    zctaLayer.overrideStyle(e.feature, { strokeWeight: 2.5, fillOpacity: 0.25 });
     if (zip) setStatus(`ZIP ${zip}${isZipSelected(zip) ? " (selected)" : " — click to select"}`);
   });
   zctaLayer.addListener("mouseout", (e) => {
@@ -204,7 +297,20 @@ function renderZctaLayer(geojson) {
   zctaLayer.addListener("click", (e) => onZctaClick(e.feature));
 }
 
+function stateName() {
+  return stateSelect.selectedOptions[0] ? stateSelect.selectedOptions[0].textContent : "this state";
+}
+
 function styleZctaFeature(feature) {
+  if (!feature.getProperty("selectable")) {
+    // Neighbouring state's ZIP: faint outline only, not clickable-looking.
+    zctaLayer.overrideStyle(feature, {
+      fillOpacity: 0,
+      strokeColor: "#c5c8d4",
+      strokeWeight: 0.5,
+    });
+    return;
+  }
   const selected = isZipSelected(feature.getProperty("ZCTA5"));
   zctaLayer.overrideStyle(feature, {
     fillColor: selected ? "#3866f2" : "#9aa0b4",
@@ -221,6 +327,10 @@ function isZipSelected(zip) {
 function onZctaClick(feature) {
   const zip = feature.getProperty("ZCTA5");
   if (!zip) return;
+  if (!feature.getProperty("selectable")) {
+    setStatus(`ZIP ${zip} is outside ${stateName()} — pick that state to search it.`, true);
+    return;
+  }
 
   const existingIndex = selectedZips.findIndex((z) => z.zip === zip);
   if (existingIndex !== -1) {
@@ -245,11 +355,18 @@ function onZctaClick(feature) {
 function zctaFeatureToGeoJson(feature) {
   // google.maps.Data features don't expose raw GeoJSON directly - rebuild
   // it from the geometry object so it can be turf.union'd at search time.
-  const rings = feature
-    .getGeometry()
-    .getArray()
-    .map((ring) => ring.getArray().map((ll) => [ll.lng(), ll.lat()]));
-  return { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: rings } };
+  // ZIPs with islands or split areas come back as MultiPolygons.
+  const polygonCoords = (polygon) =>
+    polygon.getArray().map((ring) => ring.getArray().map((ll) => [ll.lng(), ll.lat()]));
+  const geometry = feature.getGeometry();
+  if (geometry.getType() === "MultiPolygon") {
+    return {
+      type: "Feature",
+      properties: {},
+      geometry: { type: "MultiPolygon", coordinates: geometry.getArray().map(polygonCoords) },
+    };
+  }
+  return { type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: polygonCoords(geometry) } };
 }
 
 function updateZipChips() {
@@ -283,7 +400,9 @@ function clearZipSelection() {
 function fitMapToZips(zips) {
   const bounds = new google.maps.LatLngBounds();
   zips.forEach((z) => {
-    z.feature.geometry.coordinates[0].forEach(([lng, lat]) => bounds.extend({ lat, lng }));
+    const [west, south, east, north] = turf.bbox(z.feature);
+    bounds.extend({ lat: south, lng: west });
+    bounds.extend({ lat: north, lng: east });
   });
   map.fitBounds(bounds);
 }

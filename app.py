@@ -16,6 +16,7 @@ environment. On Vercel, set it in Project Settings -> Environment Variables.
 
 import json
 import os
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -24,7 +25,8 @@ import requests
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request
 
-from geo_utils import generate_tile_centers, point_in_polygon, MAX_TILE_RADIUS_MILES
+import db
+from geo_utils import generate_tile_centers, haversine_miles, point_in_polygon, MAX_TILE_RADIUS_MILES
 from us_states import US_STATES, US_STATES_BY_CODE
 
 APP_DIR = Path(__file__).resolve().parent
@@ -58,7 +60,6 @@ def _make_cache_dir(name):
 
 
 CACHE_DIR, CACHE_ENABLED = _make_cache_dir("state_boundary_cache")
-ZCTA_CACHE_DIR, ZCTA_CACHE_ENABLED = _make_cache_dir("zcta_cache")
 
 app = Flask(__name__, static_folder="public/static", static_url_path="/static")
 
@@ -98,10 +99,11 @@ TIGERWEB_STATE_QUERY = (
 )
 
 # Layer 4 of this service is "2020 Census ZIP Code Tabulation Areas" (ZCTA5).
-# Unlike the state layer above, it has no state/STUSAB field to filter on -
-# ZCTAs are a Census statistical geography, not defined in terms of state
-# lines - so state_code below is applied as a spatial "intersects" filter
-# against the state's own boundary polygon instead of a WHERE clause.
+# Only used as a fallback when no database is configured - the zctas table
+# (bulk-loaded by scripts/import_zctas.py) is the primary source. Always
+# queried with a small viewport envelope or a list of ZIP codes, never a whole
+# state's outline: the Census WAF rejects large state polygons outright (see
+# CLAUDE.md Gotchas).
 TIGERWEB_ZCTA_QUERY = (
     "https://tigerweb.geo.census.gov/arcgis/rest/services/TIGERweb/"
     "PUMA_TAD_TAZ_UGA_ZCTA/MapServer/4/query"
@@ -167,80 +169,173 @@ def fetch_state_boundary(state_code):
     return geometry, "fallback_bbox"
 
 
-def geojson_geometry_to_esri_rings(geometry):
-    """Flatten a GeoJSON Polygon or MultiPolygon's coordinate rings into the
-    flat list of rings ArcGIS REST's geometry parameter expects. Ring
-    winding isn't corrected here - fine for a spatial "intersects" filter
-    (this is a boolean test, not a rendered shape), not fine if this ever
-    needs to represent holes precisely.
-    """
-    gtype = geometry.get("type")
-    coords = geometry.get("coordinates") or []
-    rings = []
-    if gtype == "Polygon":
-        rings.extend(coords)
-    elif gtype == "MultiPolygon":
-        for polygon in coords:
-            rings.extend(polygon)
-    return rings
+ZIP_RE = re.compile(r"^\d{5}$")
+
+# The browser only asks for ZIPs once zoomed in to about county level
+# (MIN_ZIP_ZOOM in app.js); this rejects anything much bigger, so one request
+# can never try to ship a whole large state's outlines (~30 MB for CA).
+MAX_VIEWPORT_SPAN_DEGREES = 8.0
+MAX_VIEWPORT_ZCTAS = 1500
 
 
-def fetch_state_zctas(state_code):
-    """Return a GeoJSON FeatureCollection of ZCTA (ZIP Code Tabulation Area)
-    polygons that intersect the given state's boundary, plus a source tag.
-
-    The TIGERweb ZCTA layer (see TIGERWEB_ZCTA_QUERY) has no state field, so
-    this reuses fetch_state_boundary()'s polygon as a spatial filter instead
-    of a WHERE clause - sent as a POST since a real state outline is too
-    many vertices for a GET query string. Cached to disk after the first
-    successful fetch, same pattern as fetch_state_boundary().
-    """
-    state_code = state_code.upper()
-    if state_code not in US_STATES_BY_CODE:
-        raise ValueError(f"Unknown state code: {state_code}")
-
-    cache_file = ZCTA_CACHE_DIR / f"{state_code}.json"
-    if ZCTA_CACHE_ENABLED and cache_file.exists():
-        try:
-            return json.loads(cache_file.read_text()), "cached"
-        except (json.JSONDecodeError, OSError):
-            pass
-
-    state_geometry, _source = fetch_state_boundary(state_code)
-    rings = geojson_geometry_to_esri_rings(state_geometry)
-    if not rings:
-        return {"type": "FeatureCollection", "features": []}, "empty"
-
+def parse_bbox(raw):
+    """'south,west,north,east' -> (s, w, n, e) floats, or raise ValueError."""
     try:
-        resp = requests.post(
+        south, west, north, east = (float(v) for v in (raw or "").split(","))
+    except ValueError:
+        raise ValueError("Provide 'bbox' as south,west,north,east.")
+    if not (-90 <= south < north <= 90 and -180 <= west < east <= 180):
+        raise ValueError("bbox is out of range.")
+    if north - south > MAX_VIEWPORT_SPAN_DEGREES or east - west > MAX_VIEWPORT_SPAN_DEGREES:
+        raise ValueError("Area too large - zoom in to load ZIP codes.")
+    return south, west, north, east
+
+
+def fetch_zctas_in_bbox(state_code, bbox):
+    """ZCTA outlines intersecting the viewport, as a GeoJSON FeatureCollection
+    with properties {ZCTA5, selectable}. `selectable` is False for ZIPs that
+    belong entirely to another state (visible across a state line, but the
+    search is scoped to `state_code`). Outlines are simplified to roughly
+    screen resolution for the viewport size, which keeps a dense viewport
+    (e.g. around NYC) well under Vercel's ~4.5 MB response cap.
+
+    Returns (geojson, source, truncated).
+    """
+    south, west, north, east = bbox
+    tolerance = (east - west) / 2000  # degrees; about a pixel on a wide screen
+
+    if db.DB_ENABLED:
+        rows = db.fetch_all(
+            """
+            SELECT zcta5, state_codes,
+                   ST_AsGeoJSON(ST_SimplifyPreserveTopology(geom, %s), 5) AS geometry
+            FROM zctas
+            WHERE geom && ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+            -- If the cap is hit, keep the selected state's ZIPs nearest the
+            -- middle of the view, not whichever ZIP numbers sort first.
+            ORDER BY (%s = ANY(state_codes)) DESC,
+                     geom <-> ST_SetSRID(ST_MakePoint(%s, %s), 4326)
+            LIMIT %s
+            """,
+            (tolerance, west, south, east, north,
+             state_code, (west + east) / 2, (south + north) / 2,
+             MAX_VIEWPORT_ZCTAS + 1),
+        )
+        truncated = len(rows) > MAX_VIEWPORT_ZCTAS
+        features = [
+            {
+                "type": "Feature",
+                "properties": {"ZCTA5": r["zcta5"], "selectable": state_code in r["state_codes"]},
+                "geometry": json.loads(r["geometry"]),
+            }
+            for r in rows[:MAX_VIEWPORT_ZCTAS]
+        ]
+        return {"type": "FeatureCollection", "features": features}, "database", truncated
+
+    # Fallback (no DATABASE_URL): TIGERweb has no state field on this layer,
+    # so everything in view is treated as selectable.
+    data = _tigerweb_zcta_query({
+        "geometry": f"{west},{south},{east},{north}",
+        "geometryType": "esriGeometryEnvelope",
+        "spatialRel": "esriSpatialRelIntersects",
+        "inSR": 4326,
+        "maxAllowableOffset": tolerance,
+        "resultRecordCount": MAX_VIEWPORT_ZCTAS + 1,
+    })
+    if data is None:
+        return {"type": "FeatureCollection", "features": []}, "unavailable", False
+    features = data.get("features", [])
+    truncated = len(features) > MAX_VIEWPORT_ZCTAS
+    features = features[:MAX_VIEWPORT_ZCTAS]
+    for f in features:
+        f["properties"] = {"ZCTA5": (f.get("properties") or {}).get("ZCTA5"), "selectable": True}
+    return {"type": "FeatureCollection", "features": features}, "tigerweb", truncated
+
+
+def fetch_zcta_polygons(zip_codes):
+    """Full-detail outlines for specific ZIPs, for searching them.
+
+    Returns {zip: {"state_codes": [...] or None, "polygons": [ring, ...]}},
+    where each ring is the outer boundary of one part as [[lat, lng], ...]
+    (geo_utils' convention). Multi-part ZIPs (islands, split areas) get one
+    ring per part. ZIPs that don't exist are simply absent. state_codes is
+    None when it's unknown (TIGERweb fallback).
+    """
+    if db.DB_ENABLED:
+        rows = db.fetch_all(
+            "SELECT zcta5, state_codes, ST_AsGeoJSON(geom, 6) AS geometry "
+            "FROM zctas WHERE zcta5 = ANY(%s)",
+            (list(zip_codes),),
+        )
+        found = {r["zcta5"]: (r["state_codes"], json.loads(r["geometry"])) for r in rows}
+    else:
+        quoted = ",".join(f"'{z}'" for z in zip_codes)  # safe: callers validate with ZIP_RE
+        data = _tigerweb_zcta_query({"where": f"ZCTA5 IN ({quoted})"}) or {}
+        found = {
+            (f.get("properties") or {}).get("ZCTA5"): (None, f.get("geometry") or {})
+            for f in data.get("features", [])
+        }
+
+    result = {}
+    for zip_code, (state_codes, geometry) in found.items():
+        if geometry.get("type") == "Polygon":
+            parts = [geometry["coordinates"]]
+        elif geometry.get("type") == "MultiPolygon":
+            parts = geometry["coordinates"]
+        else:
+            continue
+        # GeoJSON rings are [lng, lat]; flip to [lat, lng] for geo_utils.
+        polygons = [[[lat, lng] for lng, lat in part[0]] for part in parts if part]
+        result[zip_code] = {"state_codes": state_codes, "polygons": polygons}
+    return result
+
+
+MAX_TILES_PER_ZIP = 25  # same ceiling as a drawn area; each tile is one billed Places call
+DUPLICATE_TILE_MILES = 1.0
+
+
+def tile_zcta_parts(parts):
+    """Search-tile centers covering every part of a (possibly multi-part) ZIP.
+
+    Multi-part ZIPs are mostly island chains, whose parts sit close together
+    and would otherwise each get their own near-identical tile (ZIP 99574 in
+    Alaska: 35 parts, 52 tiles). Near-duplicate tiles are dropped, and the
+    total is capped at MAX_TILES_PER_ZIP. Returns (centers, truncated).
+    """
+    centers, truncated = [], False
+    for part in parts:
+        part_tiles, part_truncated = generate_tile_centers(part)
+        truncated = truncated or part_truncated
+        for lat, lng in part_tiles:
+            if all(haversine_miles(lat, lng, c_lat, c_lng) > DUPLICATE_TILE_MILES for c_lat, c_lng in centers):
+                centers.append((lat, lng))
+    if len(centers) > MAX_TILES_PER_ZIP:
+        centers, truncated = centers[:MAX_TILES_PER_ZIP], True
+    return centers, truncated
+
+
+def _tigerweb_zcta_query(params):
+    """GET the TIGERweb ZCTA layer; returns parsed GeoJSON or None on any
+    failure (including the WAF's HTML rejection page)."""
+    try:
+        resp = requests.get(
             TIGERWEB_ZCTA_QUERY,
-            data={
-                "geometry": json.dumps({"rings": rings, "spatialReference": {"wkid": 4326}}),
-                "geometryType": "esriGeometryPolygon",
-                "spatialRel": "esriSpatialRelIntersects",
-                "inSR": 4326,
-                "outSR": 4326,
+            params={
                 "outFields": "ZCTA5",
                 "returnGeometry": "true",
-                "geometryPrecision": 4,
+                "outSR": 4326,
+                "geometryPrecision": 5,
                 "f": "geojson",
+                **params,
             },
             timeout=20,
             headers={"User-Agent": "restaurant-coverage-app/1.0"},
         )
         resp.raise_for_status()
         data = resp.json()
-        if "features" in data:
-            if ZCTA_CACHE_ENABLED:
-                try:
-                    cache_file.write_text(json.dumps(data))
-                except OSError:
-                    pass  # caching is a nice-to-have, not worth failing the request over
-            return data, "live"
-    except (requests.RequestException, ValueError, KeyError, json.JSONDecodeError):
-        pass
-
-    return {"type": "FeatureCollection", "features": []}, "unavailable"
+        return data if "features" in data else None
+    except (requests.RequestException, ValueError):
+        return None
 
 
 def google_places_paginated(url, base_params, api_key):
@@ -350,20 +445,23 @@ def api_state_boundary():
 
 @app.route("/api/zctas")
 def api_zctas():
-    """ZCTA (ZIP code) boundaries for one state, for the map's hover/click
-    ZIP selector. See fetch_state_zctas() for why this is a spatial query
-    against the state's own polygon rather than a WHERE clause.
+    """ZCTA (ZIP code) outlines in the visible map area, for the map's
+    hover/click ZIP selector. The browser calls this as the user pans/zooms
+    (only once zoomed in far enough), never for a whole state at once - see
+    fetch_zctas_in_bbox() and CLAUDE.md Gotchas.
+
+    Query params: state (2-letter code), bbox (south,west,north,east).
     """
     state_code = request.args.get("state", "").upper()
     if not state_code or state_code not in US_STATES_BY_CODE:
         return jsonify({"error": "Provide a valid 'state' query param (2-letter code)."}), 400
-
     try:
-        geojson, source = fetch_state_zctas(state_code)
+        bbox = parse_bbox(request.args.get("bbox"))
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    return jsonify({"state": state_code, "source": source, "geojson": geojson})
+    geojson, source, truncated = fetch_zctas_in_bbox(state_code, bbox)
+    return jsonify({"state": state_code, "source": source, "truncated": truncated, "geojson": geojson})
 
 
 @app.route("/api/search", methods=["POST"])
@@ -522,6 +620,7 @@ def api_search_zips():
     the exact same tiling/point-in-polygon logic /api/search-area already
     uses for a hand-drawn shape, just applied to a ZCTA's polygon instead.
     A ZIP is small enough that this is almost always a single tile/call.
+    Multi-part ZIPs (islands etc.) tile each part.
     """
     api_key = get_places_api_key()
     if not api_key:
@@ -543,24 +642,16 @@ def api_search_zips():
         return jsonify({"error": "At least one zip_code is required."}), 400
     if len(zip_codes) > 3:
         return jsonify({"error": "At most 3 zip codes can be searched at once."}), 400
+    bad = [z for z in zip_codes if not ZIP_RE.match(z)]
+    if bad:
+        return jsonify({"error": f"Not a 5-digit zip code: {', '.join(bad)}"}), 400
 
-    try:
-        zcta_geojson, _source = fetch_state_zctas(state_code)
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-
-    # ZCTA polygons come back as [lng, lat] GeoJSON rings; geo_utils works in
-    # [lat, lng] pairs (matching the rest of this app), so flip on the way in.
-    polygons_by_zip = {}
-    for feature in zcta_geojson.get("features", []):
-        zip_code = (feature.get("properties") or {}).get("ZCTA5")
-        geometry = feature.get("geometry") or {}
-        if not zip_code or geometry.get("type") != "Polygon":
-            continue
-        outer_ring = (geometry.get("coordinates") or [[]])[0]
-        polygons_by_zip[zip_code] = [[lat, lng] for lng, lat in outer_ring]
-
-    missing = [z for z in zip_codes if z not in polygons_by_zip]
+    zctas = fetch_zcta_polygons(zip_codes)
+    missing = [
+        z for z in zip_codes
+        if z not in zctas
+        or (zctas[z]["state_codes"] is not None and state_code not in zctas[z]["state_codes"])
+    ]
     if missing:
         return jsonify({
             "error": f"Zip code(s) not found in {state_code}: {', '.join(missing)}"
@@ -572,8 +663,8 @@ def api_search_zips():
     errors = []
 
     for zip_code in zip_codes:
-        polygon = polygons_by_zip[zip_code]
-        tile_centers, truncated = generate_tile_centers(polygon)
+        parts = zctas[zip_code]["polygons"]
+        tile_centers, truncated = tile_zcta_parts(parts)
         any_zip_truncated = any_zip_truncated or truncated
 
         zip_result_count = 0
@@ -590,7 +681,7 @@ def api_search_zips():
                 p_lat, p_lng = loc.get("lat"), loc.get("lng")
                 if p_lat is None or p_lng is None:
                     continue
-                if not point_in_polygon(p_lat, p_lng, polygon):
+                if not any(point_in_polygon(p_lat, p_lng, part) for part in parts):
                     continue
                 place_id = r.get("place_id")
                 if place_id and place_id not in by_place_id:

@@ -273,3 +273,63 @@ button#search-btn:hover:not(:disabled) {
 .map-control-btn:hover {
   background: #ebebeb;
 }
+
+/* Search in progress: spinner on the button, bar across the top of the map. */
+button#search-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+button#search-btn .spinner {
+  display: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+button#search-btn.loading .spinner { display: inline-block; }
+
+/* Keep the button its normal blue while loading rather than the faded
+   disabled colour, so the spinner reads as "working", not "broken". */
+button#search-btn.loading:disabled { background: #3866f2; cursor: progress; }
+
+#search-wait-hint.hidden { display: none; }
+
+#map-loading-bar {
+  position: fixed;
+  top: 0;
+  left: 340px; /* sidebar width */
+  right: 0;
+  height: 4px;
+  z-index: 10;
+  overflow: hidden;
+  background: rgba(56, 102, 242, 0.18);
+}
+
+#map-loading-bar.hidden { display: none; }
+
+#map-loading-bar::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 35%;
+  background: #3866f2;
+  animation: slide 1.3s ease-in-out infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes slide {
+  from { left: -35%; }
+  to { left: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button#search-btn .spinner,
+  #map-loading-bar::after { animation-duration: 3s; }
+}

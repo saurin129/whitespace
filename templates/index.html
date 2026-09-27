@@ -48,7 +48,11 @@
       <button type="button" id="clear-draw-btn" class="secondary hidden">Clear</button>
     </div>
 
-    <button type="submit" id="search-btn">Search</button>
+    <button type="submit" id="search-btn">
+      <span class="spinner" aria-hidden="true"></span>
+      <span class="label">Search</span>
+    </button>
+    <p id="search-wait-hint" class="hint hidden">Google returns results a page at a time, with a short required pause between pages, so a search usually takes 5&ndash;20 seconds.</p>
   </form>
 
   <div id="status"></div>
@@ -62,6 +66,7 @@
 </div>
 
 <div id="map"></div>
+<div id="map-loading-bar" class="hidden" role="progressbar" aria-label="Searching"></div>
 
 <!-- Turf.js for the polygon math (union of circles, difference against the state shape) -->
 <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>

@@ -484,6 +484,7 @@ async function onSearch(evt) {
   }
 
   btn.disabled = true;
+  const stopLoading = startLoading(btn);
   clearResults();
 
   try {
@@ -497,8 +498,36 @@ async function onSearch(evt) {
     console.error(err);
     setStatus(err.message || "Something went wrong.", true);
   } finally {
+    stopLoading();
     btn.disabled = false;
   }
+}
+
+// Search-in-progress indicators: spinner + elapsed seconds on the Search
+// button, an animated bar across the top of the map, and a note on why it's
+// slow. A search is one request with no progress updates (Places pages have
+// a required ~2s pause between them), so this is indeterminate, not a %.
+function startLoading(btn) {
+  const label = btn.querySelector(".label");
+  const bar = document.getElementById("map-loading-bar");
+  const hint = document.getElementById("search-wait-hint");
+  const started = Date.now();
+  const tick = () => {
+    const secs = Math.floor((Date.now() - started) / 1000);
+    label.textContent = secs >= 1 ? `Searching… ${secs}s` : "Searching…";
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
+  btn.classList.add("loading");
+  bar.classList.remove("hidden");
+  hint.classList.remove("hidden");
+  return () => {
+    clearInterval(timer);
+    label.textContent = "Search";
+    btn.classList.remove("loading");
+    bar.classList.add("hidden");
+    hint.classList.add("hidden");
+  };
 }
 
 async function searchZips(restaurantName, radiusMiles, stateCode, zips) {

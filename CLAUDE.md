@@ -218,6 +218,12 @@ pass itself is not built yet.
   Reset (`resetResults`) never touches ZIPs. Default radius is 2 miles. Multi-part ZIPs are searched per part, with near-duplicate tiles
   dropped and a 25-tile (= 25 billed Places calls) cap per ZIP - Alaska island ZIP 99574
   would otherwise cost 52 calls.
+- **ZIP outlines must be hidden while drawing a search area.** The ZIP `Data` layer sits
+  above the map and swallows clicks, so draw-mode clicks selected ZIPs instead of placing
+  vertices (found in Playwright with real mouse clicks: 1 of 4 points placed, 3 ZIPs
+  selected). `startDrawing()` calls `suspendZipLayer()` and locks the state dropdown;
+  `clearDrawnPolygon()` calls `resumeZipLayer()`. Keep this if adding other map-click
+  features.
 - **Places Nearby Search: `radius` is only a preference when a `keyword` is given.**
   Measured 2026-09-27: a 1.4-mile circle in Westwood returned 60 Chipotles out to 18 miles
   (2 inside the circle), so every search paged through all 3 pages with a ~2s wait before

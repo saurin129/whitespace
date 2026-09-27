@@ -131,6 +131,12 @@ function startDrawing() {
   clearDrawBtn.classList.remove("hidden");
   clearDrawBtn.textContent = "Cancel";
 
+  // ZIP outlines sit on top of the map and would catch these clicks
+  // (selecting ZIPs instead of placing points), so hide them while a drawn
+  // area is in play. The state dropdown is locked too, like after Finish.
+  suspendZipLayer();
+  stateSelect.disabled = true;
+
   setStatus("Click points on the map to outline your search area, then click “Finish area” (at least 3 points).");
 }
 
@@ -189,6 +195,29 @@ function clearDrawnPolygon() {
   stateSelect.required = true;
   stateSelect.disabled = false;
   if (stateSelect.value) zipPanel.classList.remove("hidden");
+  resumeZipLayer();
+}
+
+// Hide the selected state's ZIP outlines and stop loading more, without
+// dropping them (see startDrawing). resumeZipLayer() brings them back.
+function suspendZipLayer() {
+  if (zipIdleListener) {
+    google.maps.event.removeListener(zipIdleListener);
+    zipIdleListener = null;
+  }
+  if (zipViewportAbort) {
+    zipViewportAbort.abort();
+    zipViewportAbort = null;
+  }
+  if (zctaLayer) zctaLayer.setMap(null);
+  if (zipZoomHint) zipZoomHint.classList.add("hidden");
+}
+
+function resumeZipLayer() {
+  if (!stateSelect.value || !zctaLayer) return;
+  zctaLayer.setMap(map);
+  if (!zipIdleListener) zipIdleListener = map.addListener("idle", loadVisibleZips);
+  loadVisibleZips();
 }
 
 function getDrawnPolygonPath() {
